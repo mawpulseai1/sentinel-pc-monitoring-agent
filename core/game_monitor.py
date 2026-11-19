@@ -149,12 +149,15 @@ KNOWN_GAME_EXES = {
 
 # Standard non-game applications & background services to ignore
 NON_GAME_APPS = {
-    "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
-    "code.exe", "devenv.exe", "pycharm64.exe", "idea64.exe", "notepad.exe",
+    "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",
+    "code.exe", "devenv.exe", "pycharm64.exe", "idea64.exe", "notepad.exe", "notepad++.exe", "sublime_text.exe",
     "cmd.exe", "powershell.exe", "conhost.exe", "windows terminal.exe", "windowsterminal.exe",
-    "python.exe", "pythonw.exe", "taskmgr.exe", "discord.exe", "spotify.exe",
+    "python.exe", "pythonw.exe", "taskmgr.exe", "discord.exe", "spotify.exe", "whatsapp.exe", "telegram.exe",
     "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "riotclientservices.exe",
     "vlc.exe", "obs64.exe", "slack.exe", "teams.exe", "system idle process",
+    # Antigravity IDE and AI tools (NEVER games)
+    "antigravity ide.exe", "antigravity ide", "antigravity.exe", "agy.exe",
+    "geminiapplauncher.exe", "geminicrashpadhandler.exe", "ollama.exe", "ollama app.exe",
     # Helper utilities & Anti-cheat services
     "epicwebhelper.exe", "crashreportclient.exe", "crashpad_handler.exe", "unins000.exe", "dxsetup.exe",
     "easyanticheat.exe", "easyanticheat_eos.exe", "beservice.exe", "beservice_x64.exe",
@@ -162,6 +165,12 @@ NON_GAME_APPS = {
     "unitycrashhandler64.exe", "unitycrashhandler32.exe", "riotclientcrashhandler.exe",
     "battlenet.exe", "agent.exe", "eaconnect_interface.exe", "ealauncher.exe"
 }
+
+# Substring keywords that strictly disqualify an application from being a game
+BLACKLIST_KEYWORDS = [
+    "antigravity", "gemini", "electron", "vscode", "pycharm", "visual studio",
+    "terminal", "python", "taskmgr", "explorer", "browser", "whatsapp", "telegram"
+]
 
 # Gaming directory markers for autonomous detection of unknown games
 GAME_DIR_MARKERS = [
@@ -178,6 +187,71 @@ GAME_DIR_MARKERS = [
     "/blizzard/",
     "/battle.net/"
 ]
+
+def is_blacklisted_app(name: str, full_path: str = "", win_title: str = "") -> bool:
+    """Strictly checks if an application is an editor, IDE, browser, or desktop utility."""
+    n_lower = (name or "").lower()
+    p_lower = (full_path or "").lower().replace("\\", "/")
+    t_lower = (win_title or "").lower()
+    
+    if n_lower in NON_GAME_APPS:
+        return True
+    if any(k in n_lower for k in BLACKLIST_KEYWORDS):
+        return True
+    if any(k in p_lower for k in ["/antigravity", "/gemini", "/pythonproject", "/microsoft vs code", "/google/chrome"]):
+        return True
+    if any(k in t_lower for k in ["antigravity ide", "visual studio code", "pycharm", "google chrome"]):
+        return True
+    return False
+
+def identify_game(name: str, full_path: str = "", win_title: str = "", custom_games: Optional[List[str]] = None) -> Optional[str]:
+    """
+    Intelligently identifies if a process is a genuine game.
+    Returns the clean display title, or None if it's not a game.
+    """
+    if is_blacklisted_app(name, full_path, win_title):
+        return None
+        
+    n_lower = (name or "").lower()
+    
+    # 1. Known game dictionary
+    if n_lower in KNOWN_GAME_EXES:
+        return KNOWN_GAME_EXES[n_lower]
+        
+    # 2. User-configured custom games
+    if custom_games and n_lower in custom_games:
+        return win_title or name
+        
+    # 3. Game library directory check (e.g. Steam, Epic, E:\Games, D:\Games)
+    dir_game = is_game_path(full_path)
+    if dir_game:
+        return win_title or dir_game
+        
+    # 4. Game engine executable suffix (Unreal / Unity shipping binaries)
+    if n_lower.endswith("-shipping.exe") or n_lower.endswith("_shipping.exe"):
+        clean = os.path.splitext(name)[0].replace("-Win64-Shipping", "").replace("_", " ").title()
+        return win_title or clean
+        
+    return None
+
+def is_same_game(session: 'GameSessionTracker', fg_name: str, fg_path: str, fg_game_title: str) -> bool:
+    """Determines if the foreground process belongs to the same game session (e.g. launcher vs engine)."""
+    if not session or not fg_name:
+        return False
+    if session.title.lower() == (fg_game_title or "").lower():
+        return True
+    # Folder match (e.g. E:\Games\STAR WARS - Galactic Racer)
+    if session.exe_path and fg_path:
+        s_dir = os.path.dirname(session.exe_path).lower().replace("\\", "/")
+        f_dir = os.path.dirname(fg_path).lower().replace("\\", "/")
+        if s_dir in f_dir or f_dir in s_dir:
+            return True
+    # Name prefix match (e.g. SWGR.exe vs SWGR-Win64-Shipping.exe)
+    s_base = os.path.splitext(session.name)[0].lower()
+    f_base = os.path.splitext(fg_name)[0].lower()
+    if s_base in f_base or f_base in s_base:
+        return True
+    return False
 
 def get_process_info(pid: int):
     """
@@ -397,24 +471,80 @@ class GameMonitor:
         self.custom_games = [g.lower() for g in game_list if g]
 
     def update(self, telemetry: Dict[str, Any]):
-        """Fast, non-blocking check called on each telemetry cycle."""
-        # 1. Update active session if running
+        """
+        Fast, non-blocking check called on each telemetry cycle.
+        Features intelligent foreground game prioritization & session switching.
+        """
+        # 1. Probe the current foreground window
+        fg_pid = 0
+        fg_name = ""
+        fg_path = ""
+        fg_title = ""
+        fg_game_title = None
+
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                p_id = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p_id))
+                if p_id.value > 4:
+                    fg_pid = p_id.value
+                    fg_name, fg_path = get_process_info(fg_pid)
+                    title_buf = ctypes.create_unicode_buffer(512)
+                    user32.GetWindowTextW(hwnd, title_buf, 512)
+                    fg_title = title_buf.value.strip()
+                    fg_game_title = identify_game(fg_name, fg_path, fg_title, self.custom_games)
+        except Exception:
+            pass
+
+        # 2. If the foreground window is a confirmed GAME
+        if fg_game_title:
+            if self.active_session is None:
+                # Start new game session immediately!
+                self._start_session(fg_pid, fg_name, fg_game_title, fg_path)
+                self.active_session.record_sample(telemetry)
+                return
+            else:
+                # A session is already active
+                if self.active_session.pid == fg_pid:
+                    # Same process: continue recording
+                    self.active_session.record_sample(telemetry)
+                    return
+                elif is_same_game(self.active_session, fg_name, fg_path, fg_game_title):
+                    # Child/partner process of the same game (e.g. Launcher -> Engine)
+                    self.active_session.pid = fg_pid
+                    self.active_session.name = fg_name
+                    self.active_session.exe_path = fg_path
+                    self.active_session.record_sample(telemetry)
+                    return
+                else:
+                    # An entirely DIFFERENT game is now in foreground! Switch sessions!
+                    old_report = self.active_session.finalize()
+                    self.last_completed_report = old_report
+                    if self.on_session_complete:
+                        self.on_session_complete(old_report)
+                    self._start_session(fg_pid, fg_name, fg_game_title, fg_path)
+                    self.active_session.record_sample(telemetry)
+                    return
+
+        # 3. Foreground window is NOT a game (e.g. alt-tabbed to desktop, browser, Discord)
         if self.active_session is not None:
-            pid = self.active_session.pid
+            # Check if active game process is still alive
             still_running = False
             try:
-                if psutil.pid_exists(pid):
-                    proc_name, _ = get_process_info(pid)
+                if psutil.pid_exists(self.active_session.pid):
+                    proc_name, _ = get_process_info(self.active_session.pid)
                     if proc_name.lower() == self.active_session.name.lower():
                         still_running = True
             except Exception:
                 still_running = False
 
             if still_running:
+                # Game is still alive in background; continue sampling
                 self.active_session.record_sample(telemetry)
                 return
             else:
-                # Process terminated -> finalize session
+                # Game closed -> finalize debrief report!
                 report = self.active_session.finalize()
                 self.last_completed_report = report
                 self.active_session = None
@@ -422,69 +552,17 @@ class GameMonitor:
                     self.on_session_complete(report)
                 return
 
-        # 2. If no game is running, detect game start (zero blocking)
-        self._detect_game_launch(telemetry)
+        # 4. If no session is active, run fallback background process scan
+        self._detect_background_game_launch(telemetry)
 
-    def _detect_game_launch(self, telemetry: Dict[str, Any]):
-        """Fast multi-method detection: active window check + process scan."""
-        # Method A: Active Foreground Window Check (fastest & most accurate)
-        try:
-            hwnd = user32.GetForegroundWindow()
-            if hwnd:
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value > 4:
-                    proc_name, full_path = get_process_info(pid.value)
-                    proc_name_lower = proc_name.lower()
-                    
-                    if proc_name_lower and proc_name_lower not in NON_GAME_APPS:
-                        title_buf = ctypes.create_unicode_buffer(512)
-                        user32.GetWindowTextW(hwnd, title_buf, 512)
-                        win_title = title_buf.value.strip()
-
-                        # 1. Known dictionary check
-                        if proc_name_lower in KNOWN_GAME_EXES:
-                            self._start_session(pid.value, proc_name, KNOWN_GAME_EXES[proc_name_lower], full_path)
-                            return
-
-                        # 2. Custom user list check
-                        if proc_name_lower in self.custom_games:
-                            self._start_session(pid.value, proc_name, win_title or proc_name, full_path)
-                            return
-
-                        # 3. Game library directory check (Steam, Epic, Games folders)
-                        dir_game_title = is_game_path(full_path)
-                        if dir_game_title:
-                            final_title = win_title or dir_game_title
-                            self._start_session(pid.value, proc_name, final_title, full_path)
-                            return
-
-                        # 4. Engine naming patterns (Unreal, Unity, shipping, demo)
-                        if any(pat in proc_name_lower for pat in ["-shipping.exe", "_shipping.exe", "game.exe", "_game.exe"]):
-                            clean_title = win_title or os.path.splitext(proc_name)[0].replace("-Win64-Shipping", "").replace("_", " ").title()
-                            self._start_session(pid.value, proc_name, clean_title, full_path)
-                            return
-
-                        # 5. Fullscreen / High GPU detection for unknown window
-                        gpu = telemetry.get("gpu", {})
-                        gpu_util = gpu.get("utilization", 0.0) if gpu.get("available") else 0.0
-                        rect = wintypes.RECT()
-                        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                        is_fullscreen = (rect.right - rect.left >= 1900 and rect.bottom - rect.top >= 1000)
-                        
-                        if (is_fullscreen or gpu_util > 20.0) and win_title and win_title.lower() not in ["program manager", "windows input experience"]:
-                            self._start_session(pid.value, proc_name, win_title, full_path)
-                            return
-        except Exception:
-            pass
-
-        # Method B: Fast Process Name Scan (only queries name, never calls blocking exe())
+    def _detect_background_game_launch(self, telemetry: Dict[str, Any]):
+        """Fast process iteration fallback for games launched in background."""
         try:
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     name = (p.info.get('name') or '').lower()
                     pid = p.info.get('pid') or 0
-                    if pid <= 4 or name in NON_GAME_APPS:
+                    if pid <= 4 or is_blacklisted_app(name):
                         continue
                     
                     # Known game check
@@ -493,7 +571,7 @@ class GameMonitor:
                         return
                         
                     # Custom game check
-                    if name in self.custom_games:
+                    if self.custom_games and name in self.custom_games:
                         self._start_session(pid, p.info['name'], p.info['name'])
                         return
 

@@ -18,7 +18,10 @@ class SystemAgent:
         self.engine = TelemetryEngine()
         
         # Game Activity Monitor
-        self.game_monitor = GameMonitor(on_session_complete=self._on_game_completed)
+        self.game_monitor = GameMonitor(
+            on_session_complete=self._on_game_completed,
+            on_session_start=self._on_game_started
+        )
         if custom_games:
             self.game_monitor.set_custom_games(custom_games)
         self.latest_game_report: Optional[Dict[str, Any]] = None
@@ -130,6 +133,13 @@ class SystemAgent:
             self.game_monitor.update(data)
         except Exception as e:
             print(f"Game monitor error: {e}")
+
+    def _on_game_started(self, title: str, name: str):
+        """Called when a game process is detected and tracking starts."""
+        with self._lock:
+            self._agent_mood = "COMBAT_WATCH"
+            self._agent_thought = f"Surveillance active: {title} (Profiling GPU pipeline, thermals & VRAM)."
+            self._add_log("GAME_START", f"Game detected: {title} ({name}) - profiling engaged.", "INFO")
 
     def _on_game_completed(self, report: Dict[str, Any]):
         """Called when a game process exits."""

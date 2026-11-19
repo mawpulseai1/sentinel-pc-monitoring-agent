@@ -71,6 +71,8 @@ KNOWN_GAME_EXES = {
     # Rockstar
     "gta5.exe": "Grand Theft Auto V",
     "playgtav.exe": "GTA V",
+    "gta5_enhanced.exe": "Grand Theft Auto V (Enhanced)",
+    "gta5_enhanced_be.exe": "Grand Theft Auto V (Enhanced)",
     "rdr2.exe": "Red Dead Redemption 2",
 
     # Capcom / Square Enix
@@ -109,6 +111,33 @@ KNOWN_GAME_EXES = {
     "warframe.x64.exe": "Warframe",
     "pathofexile.exe": "Path of Exile",
     "pathofexile_x64.exe": "Path of Exile",
+    "pathofexilesteam.exe": "Path of Exile",
+    "pathofexile_x64steam.exe": "Path of Exile",
+    "pathofexile2.exe": "Path of Exile 2",
+    "pathofexile2_x64.exe": "Path of Exile 2",
+    "pathofexile2steam.exe": "Path of Exile 2",
+    "swgr.exe": "Star Wars: Galactic Racer",
+    "swgr-win64-shipping.exe": "Star Wars: Galactic Racer",
+    "dnfduel.exe": "DNF Duel",
+    "dnfduel-win64-shipping.exe": "DNF Duel",
+    "tekken8.exe": "Tekken 8",
+    "tekken8-win64-shipping.exe": "Tekken 8",
+    "sf6.exe": "Street Fighter 6",
+    "mk12.exe": "Mortal Kombat 1",
+    "pubg.exe": "PUBG: Battlegrounds",
+    "tslgame.exe": "PUBG: Battlegrounds",
+    "cod.exe": "Call of Duty",
+    "warzone.exe": "Call of Duty: Warzone",
+    "modernwarfare.exe": "Call of Duty: Modern Warfare",
+    "blackops6.exe": "Call of Duty: Black Ops 6",
+    "bo6.exe": "Call of Duty: Black Ops 6",
+    "eurotrucks2.exe": "Euro Truck Simulator 2",
+    "amtrucks.exe": "American Truck Simulator",
+    "beamng.drive.x64.exe": "BeamNG.drive",
+    "assettocorsa.exe": "Assetto Corsa",
+    "acs.exe": "Assetto Corsa Competizione",
+    "wutheringwaves.exe": "Wuthering Waves",
+    "wutheringwaves-win64-shipping.exe": "Wuthering Waves",
     "terraria.exe": "Terraria",
     "hades.exe": "Hades",
     "hades2.exe": "Hades II",
@@ -118,15 +147,103 @@ KNOWN_GAME_EXES = {
     "marvelrivals.exe": "Marvel Rivals"
 }
 
-# Standard non-game applications to ignore for foreground window detection
+# Standard non-game applications & background services to ignore
 NON_GAME_APPS = {
     "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
     "code.exe", "devenv.exe", "pycharm64.exe", "idea64.exe", "notepad.exe",
     "cmd.exe", "powershell.exe", "conhost.exe", "windows terminal.exe", "windowsterminal.exe",
     "python.exe", "pythonw.exe", "taskmgr.exe", "discord.exe", "spotify.exe",
     "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "riotclientservices.exe",
-    "vlc.exe", "obs64.exe", "slack.exe", "teams.exe", "system idle process"
+    "vlc.exe", "obs64.exe", "slack.exe", "teams.exe", "system idle process",
+    # Helper utilities & Anti-cheat services
+    "epicwebhelper.exe", "crashreportclient.exe", "crashpad_handler.exe", "unins000.exe", "dxsetup.exe",
+    "easyanticheat.exe", "easyanticheat_eos.exe", "beservice.exe", "beservice_x64.exe",
+    "rockstarservice.exe", "rockstarsteamhelper.exe", "rockstar-games-launcher.exe", "socialclubhelper.exe",
+    "unitycrashhandler64.exe", "unitycrashhandler32.exe", "riotclientcrashhandler.exe",
+    "battlenet.exe", "agent.exe", "eaconnect_interface.exe", "ealauncher.exe"
 }
+
+# Gaming directory markers for autonomous detection of unknown games
+GAME_DIR_MARKERS = [
+    "/steamapps/common/",
+    "/steamlibrary/",
+    "/epic games/",
+    "/games/",
+    "/riot games/",
+    "/gog galaxy/games/",
+    "/gog games/",
+    "/ubisoft/",
+    "/ubisoft game launcher/games/",
+    "/ea games/",
+    "/blizzard/",
+    "/battle.net/"
+]
+
+def get_process_info(pid: int):
+    """
+    Safely retrieves (process_name, full_path) for any PID,
+    handling elevated processes and anti-cheat hooks.
+    """
+    proc_name = ""
+    full_path = ""
+    
+    # 1. Try psutil
+    try:
+        p = psutil.Process(pid)
+        proc_name = p.name()
+        try:
+            full_path = p.exe()
+        except Exception:
+            pass
+    except Exception:
+        pass
+        
+    # 2. Win32 QueryFullProcessImageNameW fallback for elevated / anti-cheat processes
+    if not full_path or not proc_name:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if h_proc:
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                    full_path = buf.value
+                    if not proc_name:
+                        proc_name = os.path.basename(full_path)
+            finally:
+                kernel32.CloseHandle(h_proc)
+
+    return proc_name, full_path
+
+def is_game_path(full_path: str):
+    """
+    Checks if an executable path is inside any known gaming library/directory.
+    Returns clean game title extracted from path if found.
+    """
+    if not full_path:
+        return None
+        
+    norm_path = full_path.replace("\\", "/").lower()
+    base_name = os.path.basename(full_path).lower()
+    
+    if (base_name in NON_GAME_APPS or base_name.startswith("unins") or 
+        "crash" in base_name or "redist" in norm_path or "setup" in base_name or "installer" in base_name):
+        return None
+        
+    for marker in GAME_DIR_MARKERS:
+        if marker in norm_path:
+            try:
+                idx = norm_path.find(marker) + len(marker)
+                rest = full_path[idx:].replace("\\", "/")
+                folder = rest.split("/")[0]
+                if folder and not folder.lower().endswith(".exe") and len(folder) > 2:
+                    return folder
+            except Exception:
+                pass
+            return os.path.splitext(base_name)[0].replace("-Win64-Shipping", "").replace("_", " ").title()
+            
+    return None
 
 class GameSessionTracker:
     def __init__(self, pid: int, name: str, title: str, exe_path: str = ""):
@@ -269,8 +386,9 @@ class GameSessionTracker:
         }
 
 class GameMonitor:
-    def __init__(self, on_session_complete: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def __init__(self, on_session_complete: Optional[Callable[[Dict[str, Any]], None]] = None, on_session_start: Optional[Callable[[str, str], None]] = None):
         self.on_session_complete = on_session_complete
+        self.on_session_start = on_session_start
         self.active_session: Optional[GameSessionTracker] = None
         self.last_completed_report: Optional[Dict[str, Any]] = None
         self.custom_games: List[str] = []
@@ -286,8 +404,8 @@ class GameMonitor:
             still_running = False
             try:
                 if psutil.pid_exists(pid):
-                    p = psutil.Process(pid)
-                    if p.name().lower() == self.active_session.name.lower():
+                    proc_name, _ = get_process_info(pid)
+                    if proc_name.lower() == self.active_session.name.lower():
                         still_running = True
             except Exception:
                 still_running = False
@@ -316,34 +434,46 @@ class GameMonitor:
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 if pid.value > 4:
-                    p = psutil.Process(pid.value)
-                    proc_name = p.name().lower()
+                    proc_name, full_path = get_process_info(pid.value)
+                    proc_name_lower = proc_name.lower()
                     
-                    if proc_name not in NON_GAME_APPS:
+                    if proc_name_lower and proc_name_lower not in NON_GAME_APPS:
                         title_buf = ctypes.create_unicode_buffer(512)
                         user32.GetWindowTextW(hwnd, title_buf, 512)
                         win_title = title_buf.value.strip()
 
-                        # Check known list
-                        if proc_name in KNOWN_GAME_EXES:
-                            self._start_session(pid.value, p.name(), KNOWN_GAME_EXES[proc_name])
+                        # 1. Known dictionary check
+                        if proc_name_lower in KNOWN_GAME_EXES:
+                            self._start_session(pid.value, proc_name, KNOWN_GAME_EXES[proc_name_lower], full_path)
                             return
 
-                        # Check custom user list
-                        if proc_name in self.custom_games:
-                            self._start_session(pid.value, p.name(), win_title or proc_name)
+                        # 2. Custom user list check
+                        if proc_name_lower in self.custom_games:
+                            self._start_session(pid.value, proc_name, win_title or proc_name, full_path)
                             return
 
-                        # Check Unreal/Unity game pattern
-                        if "-shipping.exe" in proc_name or "_shipping.exe" in proc_name or "game.exe" in proc_name:
-                            clean_title = win_title or os.path.splitext(p.name())[0].replace("-Win64-Shipping", "").replace("_", " ").title()
-                            self._start_session(pid.value, p.name(), clean_title)
+                        # 3. Game library directory check (Steam, Epic, Games folders)
+                        dir_game_title = is_game_path(full_path)
+                        if dir_game_title:
+                            final_title = win_title or dir_game_title
+                            self._start_session(pid.value, proc_name, final_title, full_path)
                             return
 
-                        # Check high GPU activity (>25% GPU or >1GB VRAM) for unknown fullscreen/foreground window
+                        # 4. Engine naming patterns (Unreal, Unity, shipping, demo)
+                        if any(pat in proc_name_lower for pat in ["-shipping.exe", "_shipping.exe", "game.exe", "_game.exe"]):
+                            clean_title = win_title or os.path.splitext(proc_name)[0].replace("-Win64-Shipping", "").replace("_", " ").title()
+                            self._start_session(pid.value, proc_name, clean_title, full_path)
+                            return
+
+                        # 5. Fullscreen / High GPU detection for unknown window
                         gpu = telemetry.get("gpu", {})
-                        if gpu.get("available") and gpu.get("utilization", 0.0) > 25.0 and win_title:
-                            self._start_session(pid.value, p.name(), win_title)
+                        gpu_util = gpu.get("utilization", 0.0) if gpu.get("available") else 0.0
+                        rect = wintypes.RECT()
+                        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                        is_fullscreen = (rect.right - rect.left >= 1900 and rect.bottom - rect.top >= 1000)
+                        
+                        if (is_fullscreen or gpu_util > 20.0) and win_title and win_title.lower() not in ["program manager", "windows input experience"]:
+                            self._start_session(pid.value, proc_name, win_title, full_path)
                             return
         except Exception:
             pass
@@ -377,8 +507,13 @@ class GameMonitor:
         except Exception:
             pass
 
-    def _start_session(self, pid: int, name: str, title: str):
-        self.active_session = GameSessionTracker(pid, name, title)
+    def _start_session(self, pid: int, name: str, title: str, exe_path: str = ""):
+        self.active_session = GameSessionTracker(pid, name, title, exe_path)
+        if self.on_session_start:
+            try:
+                self.on_session_start(title, name)
+            except Exception as e:
+                print(f"Error in on_session_start callback: {e}")
 
     def start_manual_tracking(self, app_name: str = "", win_title: str = "") -> bool:
         """Allows manual tracking of the current active window or specified app."""
@@ -387,11 +522,11 @@ class GameMonitor:
             if hwnd:
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                p = psutil.Process(pid.value)
+                proc_name, full_path = get_process_info(pid.value)
                 title_buf = ctypes.create_unicode_buffer(512)
                 user32.GetWindowTextW(hwnd, title_buf, 512)
-                title = win_title or title_buf.value or p.name()
-                self._start_session(pid.value, p.name(), title)
+                title = win_title or title_buf.value or proc_name
+                self._start_session(pid.value, proc_name, title, full_path)
                 return True
         except Exception:
             pass

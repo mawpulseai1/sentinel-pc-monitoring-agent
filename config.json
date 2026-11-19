@@ -1,0 +1,21 @@
+{
+    "theme": "cyber_neon",
+    "layout": "dual_wing",
+    "screen_position": "right_half",
+    "mode": "wallpaper",
+    "opacity": 0.9,
+    "fps": 60,
+    "sample_interval": 1.0,
+    "click_through": true,
+    "font_family": "Cascadia Code",
+    "font_size": 10,
+    "panel_backdrop": true,
+    "panel_opacity": 0.4,
+    "show_ambient_stream": true,
+    "show_per_core_matrix": true,
+    "history_points": 35,
+    "custom_games": [],
+    "game_report_auto_dismiss_sec": 150,
+    "agent_avatar_enabled": true,
+    "agent_neural_wave_enabled": true
+}

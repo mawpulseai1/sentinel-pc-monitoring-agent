@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary / OS
+scratch/
+.DS_Store
+Thumbs.db

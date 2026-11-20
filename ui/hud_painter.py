@@ -19,6 +19,30 @@ from ui.ascii_art import (
     get_mascot_segments
 )
 
+def wrap_monospace_text(text: str, max_chars: int) -> List[str]:
+    """Wraps text into lines that do not exceed max_chars, breaking cleanly on whitespace."""
+    if not text or max_chars <= 6:
+        return [text] if text else []
+    words = text.split()
+    lines = []
+    current_line = []
+    current_len = 0
+    
+    for word in words:
+        w_len = len(word)
+        needed = w_len + (1 if current_line else 0)
+        if current_len + needed <= max_chars:
+            current_line.append(word)
+            current_len += needed
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [word]
+            current_len = w_len
+    if current_line:
+        lines.append(" ".join(current_line))
+    return lines
+
 class HUDPainter:
     def __init__(self, config):
         self.config = config
@@ -1010,20 +1034,38 @@ class HUDPainter:
             curr_y1 += line_h
 
             subhead = [
-                ("TOP CHATTER STORIES // REAL-TIME FACT-CHECKED & CLUSTERED", theme["secondary"])
+                ("LIVE FACT-CHECKED NEWS & PUBLIC SOCIAL CHATTER // CLICK [1-4] TO EXPAND", theme["secondary"])
             ]
             self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, subhead, theme, small_font)
             curr_y1 += line_h + 8
 
             for idx, item in enumerate(items[:4]):
                 item_id = item.get("id", f"news_{idx}")
+                idx_num = item.get("index", idx + 1)
                 is_exp = (item_id == expanded_id)
                 is_hover = (item_id == hovered_item_id)
                 posts = item.get("live_posts", [])
+                is_chatter_vis = item.get("is_chatter_visible", True)
+
+                # Precompute wrapped detail and comment lines for exact card height
+                detail_text = item.get("details") or item.get("summary", "")
+                detail_lines = wrap_monospace_text(detail_text, col1_chars - 8) if is_exp else []
+                detail_lines = detail_lines[:6] # Limit to max 6 lines of deep context
                 
-                # Compute height of card
-                post_lines = (len(posts) * 3 + 2) if is_exp else 0
-                card_lines = 4 + post_lines
+                wrapped_posts = []
+                if is_exp and is_chatter_vis:
+                    for p in posts[:3]:
+                        p_lines = wrap_monospace_text(f'"{p.get("content", "")}"', col1_chars - 12)[:3]
+                        wrapped_posts.append((p, p_lines))
+
+                # Exact height calculation
+                if not is_exp:
+                    card_lines = 4
+                else:
+                    # 1 header + 1 title + 1 meta + 1 detail header + len(detail_lines) + 1 proof + 1 chatter header + chatter_lines + 1 collapse
+                    chatter_lines = sum(1 + len(plines) + 1 for _, plines in wrapped_posts) if is_chatter_vis else 0
+                    card_lines = 7 + len(detail_lines) + chatter_lines
+                
                 card_h = card_lines * line_h + 6
 
                 # Register clickable bounding box for mouse clicks
@@ -1035,85 +1077,137 @@ class HUDPainter:
                     painter.setPen(QPen(theme["accent"], 1.5))
                     painter.drawRect(QRectF(col1_x, curr_y1, col1_w, card_h))
                     painter.restore()
-                
-                # Card Header
+
                 cat = item.get("category", "TECH")
                 cred = item.get("credibility_percent", 98.0)
                 buzz = item.get("buzz_score", 90)
                 time_ago = item.get("time_ago", "recent")
-                card_head_str = f"[{cat}] · {cred:.1f}% VERIFIED · 🔥 {buzz}% BUZZ · {time_ago}"
-                self._draw_header_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, card_head_str, theme, bold_font)
-                curr_y1 += line_h
-
-                # Title
                 title_str = item.get("title", "")
-                r_title = [(f"► {title_str[:col1_chars-6]}", theme["accent"] if is_exp else theme["primary"])]
-                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_title, theme, bold_font)
-                curr_y1 += line_h
 
-                # Summary
-                summary_str = item.get("summary", "")
-                r_sum = [(f"  {summary_str[:col1_chars-6]}", theme["secondary"])]
-                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_sum, theme, small_font)
-                curr_y1 += line_h
+                if not is_exp:
+                    # Collapsed list item (1., 2., 3...)
+                    card_head_str = f"[{idx_num}] · [{cat}] · {cred:.1f}% VERIFIED · 🔥 {buzz}% BUZZ · {time_ago}"
+                    self._draw_header_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, card_head_str, theme, bold_font)
+                    curr_y1 += line_h
 
-                # Expand/Collapse and Copy Intel button line
-                if is_exp:
-                    btn_text = f"  [▲ COLLAPSE CHATTER ({len(posts)} POSTS)]"
-                    btn_col = theme["accent"]
-                    # Add Copy Intel Button
-                    btn_copy_w = 17 * char_w
-                    btn_copy_x = col1_x + (col1_chars - 20) * char_w
-                    btn_copy_rect = QRectF(btn_copy_x, curr_y1, btn_copy_w, line_h)
-                    self.button_click_rects.append((btn_copy_rect, f"copy_{item_id}"))
-                    
-                    row_btn = [
-                        (btn_text, btn_col),
-                        (" " * max(1, col1_chars - len(btn_text) - 22), theme["dim"]),
-                        ("[📋 COPY INTEL]", theme["primary"] if hovered_item_id == f"copy_{item_id}" else theme["accent"])
-                    ]
-                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, row_btn, theme, small_font)
+                    # Title with number badge
+                    r_title = [(f"  {idx_num}. ► {title_str[:col1_chars-10]}", theme["accent"] if is_hover else theme["primary"])]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_title, theme, bold_font)
+                    curr_y1 += line_h
+
+                    # Summary preview
+                    summary_str = item.get("summary", "")
+                    r_sum = [(f"     {summary_str[:col1_chars-10]}", theme["secondary"])]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_sum, theme, small_font)
+                    curr_y1 += line_h
+
+                    # Expand trigger hint
+                    expand_hint = "► CLICK TO EXPAND FULL DETAILS & CHATTER ◄" if is_hover else "CLICK TO EXPAND DETAILS & CHATTER"
+                    btn_text = f"     [▼ {expand_hint} ({len(posts)} POSTS)]"
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(btn_text, theme["accent"] if is_hover else theme["dim"])], theme, small_font)
+                    curr_y1 += line_h
+
                 else:
-                    hover_hint = " ► CLICK TO EXPAND ◄" if is_hover else " - CLICK TO EXPAND"
-                    btn_text = f"  [▼ VIEW LIVE USER CHATTER ({len(posts)} POSTS){hover_hint}]"
-                    btn_col = theme["accent"] if is_hover else theme["primary"]
-                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(btn_text, btn_col)], theme, small_font)
-                curr_y1 += line_h
+                    # Expanded Item with Full Details and Live Chatter
+                    card_head_str = f"[{idx_num}] ▼ EXPANDED INTEL · {cred:.1f}% VERIFIED · 🔥 {buzz}% BUZZ"
+                    self._draw_header_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, card_head_str, theme, bold_font)
+                    curr_y1 += line_h
 
-                # Render user posts if expanded
-                if is_exp:
-                    for post in posts[:3]:
-                        handle = post.get("handle", "@user")
-                        author = post.get("author", "User")
-                        tag = post.get("tag", "VERIFIED")
-                        p_time = post.get("time", "now")
-                        likes = post.get("likes", "1k")
-                        sent = post.get("sentiment", "HOT")
-                        p_head = [
-                            ("    ", theme["dim"]),
-                            (f"{handle}", theme["accent"]),
-                            (f" ({author}) ", theme["secondary"]),
-                            (f"[{tag}] ", theme["dim"]),
-                            (f"· {p_time} · 👍 {likes} · [{sent}]", theme["primary"])
-                        ]
-                        self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, p_head, theme, small_font)
+                    # Headline in bright accent
+                    r_title = [(f"  {idx_num}. {title_str[:col1_chars-8]}", theme["accent"])]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_title, theme, bold_font)
+                    curr_y1 += line_h
+
+                    # Source & Meta
+                    meta_row = [
+                        (f"     [{cat}] · SOURCE: {item.get('source', 'Wire')} · {time_ago} · ", theme["dim"]),
+                        (f"CREDIBILITY: {cred:.1f}%", theme["success"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, meta_row, theme, small_font)
+                    curr_y1 += line_h
+
+                    # Section 1: Full Story Breakdown & Context
+                    det_head = [
+                        ("     ◈ FULL STORY BREAKDOWN & DETAILS:", theme["primary"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, det_head, theme, bold_font)
+                    curr_y1 += line_h
+
+                    for d_line in detail_lines:
+                        self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(f"       {d_line}", theme["secondary"])], theme, small_font)
                         curr_y1 += line_h
 
-                        # Post content
-                        p_content = f'    "{post.get("content", "")}"'
-                        self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(p_content[:col1_chars-4], theme["primary"])], theme, small_font)
-                        curr_y1 += line_h
-
-                    # Fact-check note footnote
-                    fc_note = item.get("fact_check_note", "Cross-verified across multiple independent sources.")
+                    # Fact Check Note
+                    fc_note = item.get("fact_check_note", "Corroborated across independent public streams.")
                     fc_row = [
-                        ("    ✓ VERIFICATION PROOF: ", theme["success"]),
-                        (f"{fc_note[:col1_chars-30]}", theme["secondary"])
+                        ("     ✓ VERIFICATION PROOF: ", theme["success"]),
+                        (f"{fc_note[:col1_chars-34]}", theme["dim"])
                     ]
                     self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, fc_row, theme, small_font)
                     curr_y1 += line_h
 
-                self._draw_footer_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, f"SOURCE: {item.get('source', 'Web')}", theme, small_font)
+                    # Section 2: Live Public Chatter & User Posts Controls
+                    chatter_toggle_label = "[▲ HIDE CHATTER]" if is_chatter_vis else f"[▼ SHOW LIVE CHATTER ({len(posts)})]"
+                    chatter_btn_w = len(chatter_toggle_label) * char_w
+                    chatter_btn_rect = QRectF(col1_x + 5 * char_w, curr_y1, chatter_btn_w, line_h)
+                    self.button_click_rects.append((chatter_btn_rect, f"chatter_{item_id}"))
+
+                    refresh_btn_w = 12 * char_w
+                    refresh_btn_x = col1_x + 6 * char_w + chatter_btn_w
+                    refresh_btn_rect = QRectF(refresh_btn_x, curr_y1, refresh_btn_w, line_h)
+                    self.button_click_rects.append((refresh_btn_rect, f"refresh_{item_id}"))
+
+                    copy_btn_w = 16 * char_w
+                    copy_btn_x = col1_x + (col1_chars - 18) * char_w
+                    copy_btn_rect = QRectF(copy_btn_x, curr_y1, copy_btn_w, line_h)
+                    self.button_click_rects.append((copy_btn_rect, f"copy_{item_id}"))
+
+                    chatter_head_row = [
+                        (f"     💬 {chatter_toggle_label} ", theme["accent"] if hovered_item_id == f"chatter_{item_id}" else theme["primary"]),
+                        ("[⚡ REFRESH] ", theme["success"] if hovered_item_id == f"refresh_{item_id}" else theme["dim"]),
+                        (" " * max(1, col1_chars - len(chatter_toggle_label) - 34), theme["dim"]),
+                        ("[📋 COPY INTEL]", theme["primary"] if hovered_item_id == f"copy_{item_id}" else theme["accent"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, chatter_head_row, theme, small_font)
+                    curr_y1 += line_h
+
+                    # Render wrapped live posts
+                    if is_chatter_vis and wrapped_posts:
+                        for p, p_lines in wrapped_posts:
+                            handle = p.get("handle", "@user")
+                            author = p.get("author", "User")
+                            tag = p.get("tag", "COMMUNITY")
+                            p_time = p.get("time", "now")
+                            likes = p.get("likes", "1k")
+                            sent = p.get("sentiment", "ACTIVE")
+
+                            p_head = [
+                                ("       • ", theme["dim"]),
+                                (f"{handle}", theme["accent"]),
+                                (f" ({author}) ", theme["secondary"]),
+                                (f"[{tag}] ", theme["dim"]),
+                                (f"· {p_time} · 👍 {likes} · [{sent}]", theme["primary"])
+                            ]
+                            self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, p_head, theme, small_font)
+                            curr_y1 += line_h
+
+                            for pline in p_lines:
+                                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(f"         {pline}", theme["primary"])], theme, small_font)
+                                curr_y1 += line_h
+
+                            # subtle spacer
+                            self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [("         " + "·" * max(1, col1_chars - 16), theme["dim"])], theme, small_font)
+                            curr_y1 += line_h
+
+                    # Collapse footer
+                    coll_hint = "► CLICK ANYWHERE ON CARD TO COLLAPSE ◄" if is_hover else "CLICK TO COLLAPSE TO LIST VIEW"
+                    collapse_row = [
+                        (f"     [▲ {coll_hint}]", theme["accent"] if is_hover else theme["dim"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, collapse_row, theme, small_font)
+                    curr_y1 += line_h
+
+                self._draw_footer_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, f"STORY #{idx_num} // {item.get('source', 'Wire')}", theme, small_font)
                 curr_y1 += line_h + 8
 
             # --- Right Column: Agent Live Recon Stream & Cognition Panel ---

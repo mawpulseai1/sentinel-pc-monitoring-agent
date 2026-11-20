@@ -69,6 +69,13 @@ def test_news_engine_snapshot_and_timer():
     print(f"  Agent Thought: {snap['agent_thought']}")
     print(f"  Countdown: {snap['countdown_str']}")
 
+    # Verify Story Details and Multi-Post Structure
+    first_story = snap["items"][0]
+    assert first_story.get("index") == 1, "First story must have index 1"
+    assert "details" in first_story and len(first_story["details"]) > 50, "Story details must contain deep multi-sentence context"
+    assert len(first_story.get("live_posts", [])) >= 2, "Story must have multiple live user discussion posts"
+    print(f"  ✓ Story #1 has {len(first_story['details'])} chars of deep context & {len(first_story['live_posts'])} live user posts")
+
     # Test expand/collapse
     first_id = snap["items"][0]["id"]
     assert engine.expanded_news_id == first_id, "First item should be expanded by default"
@@ -83,6 +90,14 @@ def test_news_engine_snapshot_and_timer():
     engine.toggle_expand(first_id)
     assert engine.expanded_news_id == first_id, "Expand toggle failed"
     print(f"  ✓ Re-expanded news item: {first_id}")
+
+    # Test chatter visibility toggle
+    assert first_id not in engine.chatter_hidden_ids
+    engine.toggle_chatter(first_id)
+    assert first_id in engine.chatter_hidden_ids, "Chatter should be hidden after toggle"
+    engine.toggle_chatter(first_id)
+    assert first_id not in engine.chatter_hidden_ids, "Chatter should be visible after second toggle"
+    print("  ✓ Live chatter visibility toggle verified")
     print("-> News Engine Snapshot & Timer PASSED!")
 
 def test_system_agent_integration():

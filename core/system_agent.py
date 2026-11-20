@@ -277,8 +277,16 @@ class SystemAgent:
         self.news_engine.trigger_manual_sweep()
 
     def toggle_news_expansion(self, news_id: str):
-        """Toggles expanding social chatter for a given news story."""
+        """Toggles expanding details and social chatter for a given news story."""
         self.news_engine.toggle_expand(news_id)
+
+    def toggle_news_chatter(self, news_id: str):
+        """Toggles the visibility of the live chatter section inside a story."""
+        self.news_engine.toggle_chatter(news_id)
+
+    def refresh_topic_chatter(self, news_id: str):
+        """Refreshes live user opinions and comments for a specific story."""
+        self.news_engine.refresh_topic_chatter(news_id)
 
     def set_news_refresh_interval(self, sec: float):
         """Updates the news refresh schedule interval (e.g. 1800s = 30m)."""

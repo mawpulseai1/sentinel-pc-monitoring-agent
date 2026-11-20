@@ -339,6 +339,16 @@ class WallpaperWindow(QWidget):
                 if action_tag.startswith("copy_"):
                     item_id = action_tag.replace("copy_", "")
                     self._copy_news_item_to_clipboard(item_id)
+                elif action_tag.startswith("chatter_"):
+                    item_id = action_tag.replace("chatter_", "")
+                    self.agent.toggle_news_chatter(item_id)
+                    self.update()
+                elif action_tag.startswith("refresh_"):
+                    item_id = action_tag.replace("refresh_", "")
+                    self.agent.refresh_topic_chatter(item_id)
+                    self.toast_message = "⚡ UPDATING LIVE TOPIC CHATTER..."
+                    self.toast_timer = 2.5
+                    self.update()
                 elif action_tag == "nav_tel":
                     self.switch_to_view(0)
                 elif action_tag == "nav_news":
@@ -369,10 +379,12 @@ class WallpaperWindow(QWidget):
         items = snap.get("news", {}).get("items", [])
         for item in items:
             if item.get("id") == news_id:
-                clip_text = f"[{item.get('category')}] {item.get('title')}\n"
-                clip_text += f"{item.get('summary')}\n"
-                clip_text += f"Verification: {item.get('credibility_percent')}%, Proof: {item.get('fact_check_note')}\n\n"
-                clip_text += "Live Public Chatter:\n"
+                clip_text = f"[{item.get('category')}] #{item.get('index', 1)} {item.get('title')}\n\n"
+                details = item.get("details") or item.get("summary", "")
+                clip_text += f"FULL DETAILS:\n{details}\n\n"
+                clip_text += f"VERIFICATION: {item.get('credibility_percent')}%, Proof: {item.get('fact_check_note')}\n"
+                clip_text += f"SOURCE: {item.get('source')} ({item.get('url', '')})\n\n"
+                clip_text += "LIVE PUBLIC CHATTER & OPINIONS:\n"
                 for p in item.get("live_posts", []):
                     clip_text += f"• {p.get('handle')} ({p.get('author')}): \"{p.get('content')}\" (👍 {p.get('likes')})\n"
                 QApplication.clipboard().setText(clip_text)
@@ -382,7 +394,7 @@ class WallpaperWindow(QWidget):
                 break
 
     def keyPressEvent(self, event):
-        """Hotkey controls: T (Telemetry), N (News), G (Game), R (Auto-Rotate), Space (Expand News)."""
+        """Hotkey controls: T (Telemetry), N (News), G (Game), R (Auto-Rotate), Space (Expand News), 1-4 (Quick News)."""
         key = event.key()
         if key == Qt.Key.Key_T:
             self.switch_to_view(0)
@@ -400,6 +412,14 @@ class WallpaperWindow(QWidget):
                 cur_exp = snap.get("news", {}).get("expanded_news_id")
                 next_id = news_items[0]["id"] if not cur_exp else cur_exp
                 self.agent.toggle_news_expansion(next_id)
+                self.update()
+        elif self.view_mode == 2 and Qt.Key.Key_1 <= key <= Qt.Key.Key_5:
+            # 1-5 keys directly expand that numbered news item
+            idx = key - Qt.Key.Key_1
+            snap = self._cached_snapshot or self.agent.get_snapshot()
+            news_items = snap.get("news", {}).get("items", [])
+            if idx < len(news_items):
+                self.agent.toggle_news_expansion(news_items[idx]["id"])
                 self.update()
         super().keyPressEvent(event)
 

@@ -9,7 +9,7 @@ import ctypes
 from ctypes import wintypes
 from typing import Optional
 from PySide6.QtWidgets import QWidget, QApplication
-from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtCore import Qt, QTimer, QRect, QPoint
 from PySide6.QtGui import QPainter, QScreen
 
 from core.system_agent import SystemAgent
@@ -32,6 +32,10 @@ SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
+
+WM_NCHITTEST = 0x0084
+HTTRANSPARENT = -1
+HTCLIENT = 1
 
 user32 = ctypes.windll.user32
 
@@ -61,6 +65,12 @@ class WallpaperWindow(QWidget):
         self.auto_rotate_enabled = bool(self.config_mgr.get("auto_rotate_hud", True))
         self.auto_rotate_interval = float(self.config_mgr.get("hud_rotation_interval_sec", 45))
         self.auto_rotate_countdown = self.auto_rotate_interval
+        
+        # Interactive Hit-Testing & Hover States
+        self.setMouseTracking(True)
+        self.hovered_item_id = None
+        self.toast_message = ""
+        self.toast_timer = 0.0
         
         # Configure Qt window attributes
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -124,16 +134,19 @@ class WallpaperWindow(QWidget):
         if not hwnd:
             return
 
-        click_through = self.config_mgr.get("click_through", True)
+        click_through = self.config_mgr.get("click_through", False)
         mode = self.config_mgr.get("mode", "wallpaper")
 
         style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        style |= (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        style |= (WS_EX_LAYERED | WS_EX_TOOLWINDOW)
         
-        if click_through:
-            style |= WS_EX_TRANSPARENT
+        # When viewing News (view 2) or when click_through is disabled:
+        # Guarantee 100% clickability, selection, and mouse event delivery!
+        if click_through and self.view_mode != 2:
+            style |= (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
         else:
             style &= ~WS_EX_TRANSPARENT
+            style &= ~WS_EX_NOACTIVATE
 
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
         self._enforce_zorder()
@@ -145,17 +158,18 @@ class WallpaperWindow(QWidget):
             return
 
         mode = self.config_mgr.get("mode", "wallpaper")
-        if mode == "wallpaper":
+        # In News HUD (view 2) or overlay mode: bring to the top so it's directly visible and clickable
+        if self.view_mode == 2 or mode == "overlay":
             user32.SetWindowPos(
                 hwnd,
-                HWND_BOTTOM,
+                HWND_TOPMOST,
                 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
             )
         else:
             user32.SetWindowPos(
                 hwnd,
-                HWND_TOPMOST,
+                HWND_BOTTOM,
                 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
             )
@@ -194,6 +208,12 @@ class WallpaperWindow(QWidget):
                 next_v = 2 if self.view_mode == 0 else 0
                 self.switch_to_view(next_v)
 
+        # Toast message timer
+        if self.toast_timer > 0.0:
+            self.toast_timer = max(0.0, self.toast_timer - dt)
+            if self.toast_timer <= 0.0:
+                self.toast_message = ""
+
         self.update()
 
     def switch_to_view(self, target_view: int, auto_countdown: bool = True):
@@ -218,6 +238,7 @@ class WallpaperWindow(QWidget):
 
         # Reset auto-rotate countdown on manual view switches
         self.auto_rotate_countdown = self.auto_rotate_interval
+        self.setup_win32_styles()
         self.update()
 
     def toggle_auto_rotate(self) -> bool:
@@ -255,16 +276,110 @@ class WallpaperWindow(QWidget):
         new_target = 2 if self.to_view == 0 else 0
         self.switch_to_view(new_target)
 
-    def mousePressEvent(self, event):
-        """Handles interactive clicks on expandable news items."""
+    def nativeEvent(self, eventType, message):
+        """Smart Win32 hit-testing: grants 100% clickability on News HUD and over interactive buttons."""
+        if eventType in (b"windows_generic_MSG", "windows_generic_MSG"):
+            try:
+                msg = wintypes.MSG.from_address(message.__int__())
+                if msg.message == WM_NCHITTEST:
+                    # In News HUD (view 2) or when click_through is disabled:
+                    # The HUD is 100% clickable everywhere!
+                    if self.view_mode == 2 or not self.config_mgr.get("click_through", False):
+                        return (True, HTCLIENT)
+
+                    # When click_through is enabled in other views, check if mouse is over interactive buttons/cards
+                    x = wintypes.SHORT(msg.lParam & 0xFFFF).value
+                    y = wintypes.SHORT((msg.lParam >> 16) & 0xFFFF).value
+                    local_pt = self.mapFromGlobal(QPoint(x, y))
+
+                    for rect, _ in getattr(self.painter_engine, "news_click_rects", []):
+                        if rect.contains(local_pt):
+                            return (True, HTCLIENT)
+                    for rect, _ in getattr(self.painter_engine, "button_click_rects", []):
+                        if rect.contains(local_pt):
+                            return (True, HTCLIENT)
+
+                    return (True, HTTRANSPARENT)
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
+
+    def mouseMoveEvent(self, event):
+        """Detects mouse hover over interactive news cards and buttons."""
         pos = event.position().toPoint()
-        # Check if clicked inside any news story card
+        found_hover = None
         for rect, news_id in getattr(self.painter_engine, "news_click_rects", []):
             if rect.contains(pos):
-                self.agent.toggle_news_expansion(news_id)
+                found_hover = news_id
+                break
+        if not found_hover:
+            for rect, action_tag in getattr(self.painter_engine, "button_click_rects", []):
+                if rect.contains(pos):
+                    found_hover = action_tag
+                    break
+
+        if found_hover != self.hovered_item_id:
+            self.hovered_item_id = found_hover
+            if found_hover:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        """Handles interactive clicks on expandable news items, copy buttons, and HUD controls."""
+        pos = event.position().toPoint()
+        handled = False
+
+        # 1. Check Button Clicks
+        for rect, action_tag in getattr(self.painter_engine, "button_click_rects", []):
+            if rect.contains(pos):
+                handled = True
+                if action_tag.startswith("copy_"):
+                    item_id = action_tag.replace("copy_", "")
+                    self._copy_news_item_to_clipboard(item_id)
+                elif action_tag == "nav_tel":
+                    self.switch_to_view(0)
+                elif action_tag == "nav_news":
+                    self.switch_to_view(2)
+                elif action_tag == "nav_rot":
+                    self.toggle_auto_rotate()
+                elif action_tag == "nav_sweep":
+                    self.agent.refresh_news_now()
+                    self.toast_message = "⚡ RUNNING REAL-TIME INTELLIGENCE SWEEP..."
+                    self.toast_timer = 3.0
+                    self.update()
+                break
+
+        # 2. Check News Card Clicks (Expand / Collapse)
+        if not handled:
+            for rect, news_id in getattr(self.painter_engine, "news_click_rects", []):
+                if rect.contains(pos):
+                    self.agent.toggle_news_expansion(news_id)
+                    handled = True
+                    self.update()
+                    break
+
+        super().mousePressEvent(event)
+
+    def _copy_news_item_to_clipboard(self, news_id: str):
+        """Copies verified news briefing, proof, and live social user chatter to Windows clipboard."""
+        snap = self._cached_snapshot or self.agent.get_snapshot()
+        items = snap.get("news", {}).get("items", [])
+        for item in items:
+            if item.get("id") == news_id:
+                clip_text = f"[{item.get('category')}] {item.get('title')}\n"
+                clip_text += f"{item.get('summary')}\n"
+                clip_text += f"Verification: {item.get('credibility_percent')}%, Proof: {item.get('fact_check_note')}\n\n"
+                clip_text += "Live Public Chatter:\n"
+                for p in item.get("live_posts", []):
+                    clip_text += f"• {p.get('handle')} ({p.get('author')}): \"{p.get('content')}\" (👍 {p.get('likes')})\n"
+                QApplication.clipboard().setText(clip_text)
+                self.toast_message = "✓ COPIED VERIFIED INTEL TO CLIPBOARD!"
+                self.toast_timer = 3.0
                 self.update()
                 break
-        super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
         """Hotkey controls: T (Telemetry), N (News), G (Game), R (Auto-Rotate), Space (Expand News)."""
@@ -304,7 +419,9 @@ class WallpaperWindow(QWidget):
             transition_progress=self.transition_progress,
             report_countdown_sec=self.report_countdown_sec,
             report_timer_paused=self.report_timer_paused,
-            auto_rotate_countdown_sec=self.auto_rotate_countdown if self.auto_rotate_enabled else -1.0
+            auto_rotate_countdown_sec=self.auto_rotate_countdown if self.auto_rotate_enabled else -1.0,
+            hovered_item_id=self.hovered_item_id,
+            toast_message=self.toast_message
         )
 
     # Runtime configuration hooks

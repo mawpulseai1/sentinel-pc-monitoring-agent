@@ -171,10 +171,74 @@ def test_hud_rendering_and_auto_rotation():
     painter.end()
     print("-> WallpaperWindow Auto-Rotation & Multi-View Rendering PASSED!")
 
+def test_news_hud_interactivity():
+    print("\n[TEST 5] Testing News HUD Clickability & Interactive Mouse Events...")
+    app = QApplication.instance() or QApplication(sys.argv)
+    cfg = ConfigManager()
+    agent = SystemAgent()
+    data = agent.engine.collect_all()
+    agent._process_sample(data)
+    window = WallpaperWindow(agent, cfg)
+    window.switch_to_view(2)
+
+    # Render once to populate click rects
+    pix = QPixmap(960, 1080)
+    painter = QPainter(pix)
+    theme = get_theme("cyber_neon")
+    snap = agent.get_snapshot()
+    window.painter_engine.paint(painter, 960, 1080, snap, 1, theme, view_mode=2)
+    painter.end()
+
+    assert len(window.painter_engine.news_click_rects) > 0, "No news click rects found"
+    assert len(window.painter_engine.button_click_rects) > 0, "No button click rects found"
+    print(f"  ✓ {len(window.painter_engine.news_click_rects)} News Story Cards & {len(window.painter_engine.button_click_rects)} Interactive Buttons Registered")
+
+    # 1. Test Mouse Hover Event
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QPointF, QEvent
+    
+    first_rect, first_id = window.painter_engine.news_click_rects[0]
+    center_pt = first_rect.center()
+    
+    # Hover over card
+    move_ev = QMouseEvent(QEvent.Type.MouseMove, center_pt, Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    window.mouseMoveEvent(move_ev)
+    assert window.cursor().shape() == Qt.CursorShape.PointingHandCursor, "Hovering over news card must set PointingHandCursor"
+    assert window.hovered_item_id == first_id, "Hovered item ID not updated"
+    print("  ✓ Hovering over news card successfully activated PointingHandCursor & cyber highlight")
+
+    # 2. Test Mouse Click on News Card (Expand)
+    press_ev = QMouseEvent(QEvent.Type.MouseButtonPress, center_pt, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    initial_exp = snap["news"]["expanded_news_id"]
+    window.mousePressEvent(press_ev)
+    new_snap = agent.get_snapshot()
+    assert new_snap["news"]["expanded_news_id"] != initial_exp, "Clicking news card must toggle expansion"
+    print(f"  ✓ Mouse click on news card successfully toggled expansion: {new_snap['news']['expanded_news_id']}")
+
+    # 3. Test Mouse Click on [COPY INTEL] Button
+    copy_btn = next((b for b in window.painter_engine.button_click_rects if b[1].startswith("copy_")), None)
+    if copy_btn:
+        b_rect, b_tag = copy_btn
+        b_press = QMouseEvent(QEvent.Type.MouseButtonPress, b_rect.center(), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        window.mousePressEvent(b_press)
+        assert "COPIED" in window.toast_message, "Toast message not set on clipboard copy"
+        print(f"  ✓ Mouse click on [COPY INTEL] successfully copied story to clipboard: '{window.toast_message}'")
+
+    # 4. Test Mouse Click on Navigation Button ([T] TELEMETRY)
+    tel_btn = next((b for b in window.painter_engine.button_click_rects if b[1] == "nav_tel"), None)
+    assert tel_btn is not None, "Missing nav_tel button"
+    t_press = QMouseEvent(QEvent.Type.MouseButtonPress, tel_btn[0].center(), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    window.mousePressEvent(t_press)
+    assert window.to_view == 0, f"Clicking [T] Telemetry button should set target view to 0, got {window.to_view}"
+    print("  ✓ Mouse click on navigation button successfully triggered slide back to Telemetry HUD")
+
+    print("-> News HUD Clickability & Interactive Mouse Events PASSED!")
+
 if __name__ == "__main__":
     print("=== STARTING SENTINEL V3 VERIFIED NEWS & MULTI-HUD VERIFICATION ===")
     test_ai_slop_filter()
     test_news_engine_snapshot_and_timer()
     test_system_agent_integration()
     test_hud_rendering_and_auto_rotation()
+    test_news_hud_interactivity()
     print("\n=== ALL V3 NEWS & MULTI-HUD TESTS PASSED WITH 100% SUCCESS! ===")

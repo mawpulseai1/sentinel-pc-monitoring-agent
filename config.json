@@ -6,7 +6,7 @@
     "opacity": 0.9,
     "fps": 30,
     "sample_interval": 1.0,
-    "click_through": true,
+    "click_through": false,
     "font_family": "Cascadia Code",
     "font_size": 10,
     "panel_backdrop": true,

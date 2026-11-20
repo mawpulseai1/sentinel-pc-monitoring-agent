@@ -26,8 +26,9 @@ class HUDPainter:
         self.base_font_size = config.get("font_size", 10)
         self.shimmer_tick = 0
         self.news_click_rects = []
+        self.button_click_rects = []
 
-    def paint(self, painter: QPainter, width: int, height: int, snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], view_mode: int = 0, from_view: int = 0, to_view: Optional[int] = None, transition_progress: float = 1.0, report_countdown_sec: float = 0.0, report_timer_paused: bool = False, auto_rotate_countdown_sec: float = 0.0):
+    def paint(self, painter: QPainter, width: int, height: int, snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], view_mode: int = 0, from_view: int = 0, to_view: Optional[int] = None, transition_progress: float = 1.0, report_countdown_sec: float = 0.0, report_timer_paused: bool = False, auto_rotate_countdown_sec: float = 0.0, hovered_item_id: Optional[str] = None, toast_message: str = ""):
         """Main rendering entrypoint with animated multi-HUD transition router."""
         if not snapshot or not snapshot.get("telemetry"):
             self._draw_standby(painter, width, height, tick, theme)
@@ -74,7 +75,7 @@ class HUDPainter:
 
         # Transition Animation Routing
         if source_view == target_view or transition_progress >= 0.999:
-            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
+            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec, hovered_item_id, toast_message)
         else:
             # Active animated slide transition with smooth cubic easing
             t = max(0.0, min(1.0, transition_progress))
@@ -84,19 +85,19 @@ class HUDPainter:
 
             painter.save()
             painter.translate(offset_0, 0)
-            self._render_view(source_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
+            self._render_view(source_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec, hovered_item_id, toast_message)
             painter.restore()
 
             painter.save()
             painter.translate(offset_1, 0)
-            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
+            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec, hovered_item_id, toast_message)
             painter.restore()
 
-    def _render_view(self, view_idx: int, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, report_countdown_sec: float, report_timer_paused: bool, auto_rotate_countdown_sec: float):
+    def _render_view(self, view_idx: int, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, report_countdown_sec: float, report_timer_paused: bool, auto_rotate_countdown_sec: float, hovered_item_id: Optional[str] = None, toast_message: str = ""):
         if view_idx == 1:
             self._draw_game_report_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused)
         elif view_idx == 2:
-            self._draw_news_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, auto_rotate_countdown_sec)
+            self._draw_news_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, auto_rotate_countdown_sec, hovered_item_id, toast_message)
         else:
             self._draw_telemetry_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, auto_rotate_countdown_sec)
 
@@ -935,9 +936,10 @@ class HUDPainter:
         footer_status = f"AUTO-DISMISS: {'PAUSED' if report_timer_paused else ('ACTIVE' if report_countdown_sec > 0 else 'DISABLED')}"
         self._draw_footer_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, footer_status, theme, main_font)
 
-    def _draw_news_hud(self, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, auto_rotate_countdown_sec: float = 0.0):
+    def _draw_news_hud(self, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, auto_rotate_countdown_sec: float = 0.0, hovered_item_id: Optional[str] = None, toast_message: str = ""):
         """Renders the autonomous verified news feed, live social chatter, and agent recon stream."""
         self.news_click_rects = []
+        self.button_click_rects = []
         news = snapshot.get("news") or {}
         items = news.get("items", [])
         expanded_id = news.get("expanded_news_id")
@@ -951,6 +953,16 @@ class HUDPainter:
         margin_x = 20
         y = 20
         spinner = get_spinner("braille", tick)
+
+        # Draw Toast Notification (if active)
+        if toast_message:
+            toast_w = (len(toast_message) + 8) * char_w
+            toast_x = int((width - toast_w) // 2)
+            painter.fillRect(QRectF(toast_x, y - 6, toast_w, line_h + 10), theme["accent"])
+            painter.setFont(bold_font)
+            painter.setPen(QColor(10, 10, 15))
+            painter.drawText(toast_x + 2 * char_w, y + ascent, f"► {toast_message}")
+            y += line_h + 6
 
         # 1. Top Header Banner
         painter.setFont(bold_font)
@@ -1006,6 +1018,7 @@ class HUDPainter:
             for idx, item in enumerate(items[:4]):
                 item_id = item.get("id", f"news_{idx}")
                 is_exp = (item_id == expanded_id)
+                is_hover = (item_id == hovered_item_id)
                 posts = item.get("live_posts", [])
                 
                 # Compute height of card
@@ -1017,6 +1030,11 @@ class HUDPainter:
                 self.news_click_rects.append((QRectF(col1_x, curr_y1, col1_w, card_h), item_id))
 
                 self._draw_panel_backdrop(painter, col1_x, curr_y1, col1_chars * char_w, card_h, theme)
+                if is_hover:
+                    painter.save()
+                    painter.setPen(QPen(theme["accent"], 1.5))
+                    painter.drawRect(QRectF(col1_x, curr_y1, col1_w, card_h))
+                    painter.restore()
                 
                 # Card Header
                 cat = item.get("category", "TECH")
@@ -1039,14 +1057,27 @@ class HUDPainter:
                 self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_sum, theme, small_font)
                 curr_y1 += line_h
 
-                # Expand/Collapse button line
+                # Expand/Collapse and Copy Intel button line
                 if is_exp:
-                    btn_text = f"  [▲ COLLAPSE LIVE USER CHATTER ({len(posts)} POSTS)]"
+                    btn_text = f"  [▲ COLLAPSE CHATTER ({len(posts)} POSTS)]"
                     btn_col = theme["accent"]
+                    # Add Copy Intel Button
+                    btn_copy_w = 17 * char_w
+                    btn_copy_x = col1_x + (col1_chars - 20) * char_w
+                    btn_copy_rect = QRectF(btn_copy_x, curr_y1, btn_copy_w, line_h)
+                    self.button_click_rects.append((btn_copy_rect, f"copy_{item_id}"))
+                    
+                    row_btn = [
+                        (btn_text, btn_col),
+                        (" " * max(1, col1_chars - len(btn_text) - 22), theme["dim"]),
+                        ("[📋 COPY INTEL]", theme["primary"] if hovered_item_id == f"copy_{item_id}" else theme["accent"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, row_btn, theme, small_font)
                 else:
-                    btn_text = f"  [▼ VIEW LIVE USER CHATTER ({len(posts)} POSTS) - CLICK TO EXPAND]"
-                    btn_col = theme["primary"]
-                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(btn_text, btn_col)], theme, small_font)
+                    hover_hint = " ► CLICK TO EXPAND ◄" if is_hover else " - CLICK TO EXPAND"
+                    btn_text = f"  [▼ VIEW LIVE USER CHATTER ({len(posts)} POSTS){hover_hint}]"
+                    btn_col = theme["accent"] if is_hover else theme["primary"]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(btn_text, btn_col)], theme, small_font)
                 curr_y1 += line_h
 
                 # Render user posts if expanded
@@ -1195,15 +1226,26 @@ class HUDPainter:
             bot_y = max(curr_y1, curr_y2) + 8
             bot_chars = int(available_w // char_w)
             self._draw_panel_backdrop(painter, margin_x, bot_y, bot_chars * char_w, 3 * line_h, theme)
-            self._draw_header_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, "HUD CONTROLS & NAVIGATION", theme, bold_font)
+            self._draw_header_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, "HUD CONTROLS & NAVIGATION (CLICKABLE BUTTONS)", theme, bold_font)
             bot_y += line_h
 
             nav_row = [
-                ("[T] TELEMETRY HUD  •  [N] NEWS HUD  •  [SPACE] TOGGLE EXPAND CHATTER  •  [R] AUTO-ROTATE  •  TRAY: SWEEP NOW", theme["primary"])
+                ("[T] TELEMETRY ", theme["accent"] if hovered_item_id == "nav_tel" else theme["primary"]),
+                ("•  [N] NEWS HUD ", theme["accent"] if hovered_item_id == "nav_news" else theme["primary"]),
+                ("•  [SPACE] EXPAND ", theme["secondary"]),
+                ("•  [R] ROTATE ", theme["accent"] if hovered_item_id == "nav_rot" else theme["primary"]),
+                ("•  [⚡ SWEEP NOW]", theme["success"] if hovered_item_id == "nav_sweep" else theme["accent"])
             ]
             self._draw_box_row(painter, margin_x, bot_y, bot_chars, char_w, ascent, nav_row, theme, main_font)
+
+            # Register clickable hit rects for bottom navigation buttons
+            self.button_click_rects.append((QRectF(margin_x + 6, bot_y, 16 * char_w, line_h), "nav_tel"))
+            self.button_click_rects.append((QRectF(margin_x + 18 * char_w, bot_y, 16 * char_w, line_h), "nav_news"))
+            self.button_click_rects.append((QRectF(margin_x + 48 * char_w, bot_y, 14 * char_w, line_h), "nav_rot"))
+            self.button_click_rects.append((QRectF(margin_x + 64 * char_w, bot_y, 18 * char_w, line_h), "nav_sweep"))
+
             bot_y += line_h
-            self._draw_footer_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, f"ACTIVE HUD: NEWS & SOCIAL SENTRY // REFRESH IN: {countdown_str}", theme, small_font)
+            self._draw_footer_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, f"ACTIVE HUD: NEWS & SOCIAL SENTRY // REFRESH IN: {countdown_str} // CLICK ANY STORY TO EXPAND", theme, small_font)
         else:
             # Single-column fallback for ultra-narrow viewport
             single_chars = int(available_w // char_w)

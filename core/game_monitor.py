@@ -253,11 +253,22 @@ def is_same_game(session: 'GameSessionTracker', fg_name: str, fg_path: str, fg_g
         return True
     return False
 
+# Process path and info cache (avoids repeated disk access & elevated query API calls)
+_PID_INFO_CACHE: Dict[int, Any] = {}
+_PID_CACHE_TTL = 30.0
+
 def get_process_info(pid: int):
     """
     Safely retrieves (process_name, full_path) for any PID,
     handling elevated processes and anti-cheat hooks.
+    Uses in-memory caching to eliminate redundant disk & API calls.
     """
+    now = time.time()
+    if pid in _PID_INFO_CACHE:
+        c_name, c_path, c_time = _PID_INFO_CACHE[pid]
+        if now - c_time < _PID_CACHE_TTL:
+            return c_name, c_path
+
     proc_name = ""
     full_path = ""
     
@@ -288,6 +299,13 @@ def get_process_info(pid: int):
             finally:
                 kernel32.CloseHandle(h_proc)
 
+    # Evict oldest if cache exceeds 300 entries
+    if len(_PID_INFO_CACHE) > 300:
+        oldest_pids = sorted(_PID_INFO_CACHE.keys(), key=lambda k: _PID_INFO_CACHE[k][2])[:50]
+        for op in oldest_pids:
+            _PID_INFO_CACHE.pop(op, None)
+            
+    _PID_INFO_CACHE[pid] = (proc_name, full_path, now)
     return proc_name, full_path
 
 def is_game_path(full_path: str):
@@ -466,6 +484,7 @@ class GameMonitor:
         self.active_session: Optional[GameSessionTracker] = None
         self.last_completed_report: Optional[Dict[str, Any]] = None
         self.custom_games: List[str] = []
+        self._last_bg_scan_time = 0.0
 
     def set_custom_games(self, game_list: List[str]):
         self.custom_games = [g.lower() for g in game_list if g]
@@ -529,12 +548,12 @@ class GameMonitor:
 
         # 3. Foreground window is NOT a game (e.g. alt-tabbed to desktop, browser, Discord)
         if self.active_session is not None:
-            # Check if active game process is still alive
+            # Check if active game process is still alive without unnecessary disk path resolution
             still_running = False
             try:
                 if psutil.pid_exists(self.active_session.pid):
-                    proc_name, _ = get_process_info(self.active_session.pid)
-                    if proc_name.lower() == self.active_session.name.lower():
+                    p = psutil.Process(self.active_session.pid)
+                    if p.is_running() and p.name().lower() == self.active_session.name.lower():
                         still_running = True
             except Exception:
                 still_running = False
@@ -552,8 +571,11 @@ class GameMonitor:
                     self.on_session_complete(report)
                 return
 
-        # 4. If no session is active, run fallback background process scan
-        self._detect_background_game_launch(telemetry)
+        # 4. If no session is active, run fallback background process scan (throttled to every 5.0s)
+        now_ts = time.time()
+        if now_ts - self._last_bg_scan_time >= 5.0:
+            self._last_bg_scan_time = now_ts
+            self._detect_background_game_launch(telemetry)
 
     def _detect_background_game_launch(self, telemetry: Dict[str, Any]):
         """Fast process iteration fallback for games launched in background."""

@@ -63,13 +63,71 @@ class SystemTrayController:
         view_menu = menu.addMenu("Active HUD View")
         v_telemetry = view_menu.addAction("Live System Telemetry HUD")
         v_telemetry.setCheckable(True)
-        v_telemetry.setChecked(self.window.transition_target < 0.5)
-        v_telemetry.triggered.connect(lambda: self._switch_hud_view(0, v_telemetry, v_game))
+        v_telemetry.setChecked(self.window.to_view == 0)
+
+        v_news = view_menu.addAction("Verified News & Social Sentry HUD")
+        v_news.setCheckable(True)
+        v_news.setChecked(self.window.to_view == 2)
 
         v_game = view_menu.addAction("Game Performance Report HUD")
         v_game.setCheckable(True)
-        v_game.setChecked(self.window.transition_target >= 0.5)
-        v_game.triggered.connect(lambda: self._switch_hud_view(1, v_telemetry, v_game))
+        v_game.setChecked(self.window.to_view == 1)
+
+        v_telemetry.triggered.connect(lambda: self._switch_hud_view(0, v_telemetry, v_news, v_game))
+        v_news.triggered.connect(lambda: self._switch_hud_view(2, v_telemetry, v_news, v_game))
+        v_game.triggered.connect(lambda: self._switch_hud_view(1, v_telemetry, v_news, v_game))
+
+        # Auto-Rotate HUDs Submenu
+        rotate_menu = menu.addMenu("Auto-Rotate HUDs")
+        rot_enable = rotate_menu.addAction("Enable Auto-Rotation (Telemetry ⇄ News)")
+        rot_enable.setCheckable(True)
+        rot_enable.setChecked(self.window.auto_rotate_enabled)
+        rot_enable.triggered.connect(lambda checked: self._toggle_auto_rotate(rot_enable))
+
+        rotate_menu.addSeparator()
+        cur_rot_interval = float(self.config_mgr.get("hud_rotation_interval_sec", 45))
+        rot_intervals = [
+            (30, "30 Seconds"),
+            (45, "45 Seconds (Default)"),
+            (60, "1 Minute"),
+            (90, "1.5 Minutes"),
+            (120, "2 Minutes")
+        ]
+        for s_sec, s_lbl in rot_intervals:
+            sact = rotate_menu.addAction(s_lbl)
+            sact.setCheckable(True)
+            sact.setChecked(abs(cur_rot_interval - s_sec) < 1)
+            sact.triggered.connect(lambda checked, s=s_sec: self._set_auto_rotate_interval(s, rotate_menu))
+
+        # News Intelligence Sentry Submenu
+        news_menu = menu.addMenu("News Intelligence Sentry")
+        n_sweep = news_menu.addAction("⚡ Run Real-Time Sweep Now")
+        n_sweep.triggered.connect(self._run_news_sweep_now)
+
+        n_schedule = news_menu.addMenu("Automatic Sweep Schedule")
+        cur_news_interval = float(self.config_mgr.get("news_refresh_interval_sec", 1800))
+        news_intervals = [
+            (900, "Every 15 Minutes"),
+            (1800, "Every 30 Minutes (Default)"),
+            (3600, "Every 60 Minutes")
+        ]
+        for n_sec, n_lbl in news_intervals:
+            nact = n_schedule.addAction(n_lbl)
+            nact.setCheckable(True)
+            nact.setChecked(abs(cur_news_interval - n_sec) < 5)
+            nact.triggered.connect(lambda checked, s=n_sec: self._set_news_schedule_interval(s, n_schedule))
+
+        n_expand = news_menu.addMenu("Expand Social Chatter Under Story")
+        snap = self.agent.get_snapshot()
+        news_items = snap.get("news", {}).get("items", [])
+        cur_expanded = snap.get("news", {}).get("expanded_news_id")
+        for item in news_items:
+            it_title = item.get("title", "")[:32] + "..."
+            it_id = item.get("id")
+            iact = n_expand.addAction(f"[{item.get('category')}] {it_title}")
+            iact.setCheckable(True)
+            iact.setChecked(it_id == cur_expanded)
+            iact.triggered.connect(lambda checked, i_id=it_id: self._toggle_news_expand(i_id))
 
         # Game Sentinel Controls
         game_menu = menu.addMenu("Game Sentinel Controls")
@@ -222,10 +280,40 @@ class SystemTrayController:
 
         self.tray.setContextMenu(menu)
 
-    def _switch_hud_view(self, view_idx: int, v_tel: QAction, v_game: QAction):
+    def _switch_hud_view(self, view_idx: int, v_tel: QAction, v_news: QAction, v_game: QAction):
         v_tel.setChecked(view_idx == 0)
+        v_news.setChecked(view_idx == 2)
         v_game.setChecked(view_idx == 1)
         self.window.switch_to_view(view_idx)
+
+    def _toggle_auto_rotate(self, act: QAction):
+        enabled = self.window.toggle_auto_rotate()
+        act.setChecked(enabled)
+        state_str = "ENABLED (Telemetry ⇄ News HUD)" if enabled else "DISABLED (Manual Navigation)"
+        self.tray.showMessage("Sentinel HUD Rotator", f"HUD Auto-Rotation {state_str}.", QSystemTrayIcon.MessageIcon.Information, 2000)
+
+    def _set_auto_rotate_interval(self, sec: float, menu: QMenu):
+        for act in menu.actions():
+            act.setChecked(False)
+        self.window.set_auto_rotate_interval(sec)
+        self.tray.showMessage("Sentinel HUD Rotator", f"Auto-rotation interval set to {int(sec)}s.", QSystemTrayIcon.MessageIcon.Information, 2000)
+
+    def _run_news_sweep_now(self):
+        self.agent.refresh_news_now()
+        self.window.switch_to_view(2)
+        self.tray.showMessage("Sentinel Intelligence Core", "Initiating real-time news & social chatter sweep...", QSystemTrayIcon.MessageIcon.Information, 2500)
+
+    def _set_news_schedule_interval(self, sec: float, menu: QMenu):
+        for act in menu.actions():
+            act.setChecked(False)
+        self.agent.set_news_refresh_interval(sec)
+        self.config_mgr.set("news_refresh_interval_sec", sec)
+        m = int(sec // 60)
+        self.tray.showMessage("Sentinel Intelligence Core", f"Scheduled news sweep set to every {m} minutes.", QSystemTrayIcon.MessageIcon.Information, 2000)
+
+    def _toggle_news_expand(self, news_id: str):
+        self.agent.toggle_news_expansion(news_id)
+        self.window.switch_to_view(2)
 
     def _trigger_simulated_game(self):
         """Simulates a completed game session and triggers animated HUD transition."""

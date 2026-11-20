@@ -10,9 +10,10 @@ from collections import deque
 from typing import Dict, Any, List, Optional, Callable
 from core.telemetry import TelemetryEngine
 from core.game_monitor import GameMonitor
+from core.news_sentry import NewsIntelligenceEngine
 
 class SystemAgent:
-    def __init__(self, sample_interval: float = 1.0, history_length: int = 60, custom_games: Optional[List[str]] = None):
+    def __init__(self, sample_interval: float = 1.0, history_length: int = 60, custom_games: Optional[List[str]] = None, news_interval_sec: float = 1800.0, news_credibility: float = 80.0):
         self.sample_interval = sample_interval
         self.history_length = history_length
         self.engine = TelemetryEngine()
@@ -26,6 +27,12 @@ class SystemAgent:
             self.game_monitor.set_custom_games(custom_games)
         self.latest_game_report: Optional[Dict[str, Any]] = None
         self._new_game_report = False
+
+        # Autonomous News Intelligence & Social Chatter Sentry
+        self.news_engine = NewsIntelligenceEngine(
+            refresh_interval_sec=news_interval_sec,
+            min_credibility=news_credibility
+        )
         
         # History buffers (0-100 normalized or raw values)
         self.cpu_history = deque([0.0] * history_length, maxlen=history_length)
@@ -64,16 +71,18 @@ class SystemAgent:
         })
 
     def start(self):
-        """Starts the background telemetry collection thread."""
+        """Starts the background telemetry collection thread and news sentry."""
         if self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        self.news_engine.start()
 
     def stop(self):
-        """Stops the monitoring thread."""
+        """Stops the monitoring thread and news sentry."""
         self._running = False
+        self.news_engine.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
 
@@ -259,5 +268,18 @@ class SystemAgent:
                 "has_new_game_report": self._new_game_report,
                 "agent_mood": current_mood,
                 "agent_thought": current_thought,
-                "diagnostic_cycle": self._diagnostic_cycle
+                "diagnostic_cycle": self._diagnostic_cycle,
+                "news": self.news_engine.get_snapshot()
             }
+
+    def refresh_news_now(self):
+        """Forces an immediate news & social chatter intelligence sweep."""
+        self.news_engine.trigger_manual_sweep()
+
+    def toggle_news_expansion(self, news_id: str):
+        """Toggles expanding social chatter for a given news story."""
+        self.news_engine.toggle_expand(news_id)
+
+    def set_news_refresh_interval(self, sec: float):
+        """Updates the news refresh schedule interval (e.g. 1800s = 30m)."""
+        self.news_engine.set_refresh_interval(sec)

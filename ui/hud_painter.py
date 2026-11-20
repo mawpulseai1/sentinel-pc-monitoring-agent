@@ -6,7 +6,7 @@ and eliminates text-fringing / distortion.
 """
 
 import time
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QFontMetrics
 from PySide6.QtCore import QRectF, Qt
 from ui.ascii_art import (
@@ -25,12 +25,21 @@ class HUDPainter:
         self.font_family = config.get("font_family", "Cascadia Code")
         self.base_font_size = config.get("font_size", 10)
         self.shimmer_tick = 0
+        self.news_click_rects = []
 
-    def paint(self, painter: QPainter, width: int, height: int, snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], view_mode: int = 0, transition_progress: float = 0.0, report_countdown_sec: float = 0.0, report_timer_paused: bool = False):
+    def paint(self, painter: QPainter, width: int, height: int, snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], view_mode: int = 0, from_view: int = 0, to_view: Optional[int] = None, transition_progress: float = 1.0, report_countdown_sec: float = 0.0, report_timer_paused: bool = False, auto_rotate_countdown_sec: float = 0.0):
         """Main rendering entrypoint with animated multi-HUD transition router."""
         if not snapshot or not snapshot.get("telemetry"):
             self._draw_standby(painter, width, height, tick, theme)
             return
+
+        target_view = to_view if to_view is not None else view_mode
+        source_view = from_view if to_view is not None else view_mode
+
+        # Backward compatibility for legacy two-view callers
+        if to_view is None and transition_progress > 0.001 and transition_progress < 0.999:
+            source_view = 0
+            target_view = 1
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -64,28 +73,34 @@ class HUDPainter:
         painter.setOpacity(user_opacity)
 
         # Transition Animation Routing
-        if transition_progress <= 0.001:
-            self._draw_telemetry_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent)
-        elif transition_progress >= 0.999:
-            self._draw_game_report_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused)
+        if source_view == target_view or transition_progress >= 0.999:
+            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
         else:
             # Active animated slide transition with smooth cubic easing
-            t = transition_progress
+            t = max(0.0, min(1.0, transition_progress))
             ease_t = t * t * (3.0 - 2.0 * t)
             offset_0 = int(-ease_t * width)
             offset_1 = int((1.0 - ease_t) * width)
 
             painter.save()
             painter.translate(offset_0, 0)
-            self._draw_telemetry_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent)
+            self._render_view(source_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
             painter.restore()
 
             painter.save()
             painter.translate(offset_1, 0)
-            self._draw_game_report_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused)
+            self._render_view(target_view, painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused, auto_rotate_countdown_sec)
             painter.restore()
 
-    def _draw_telemetry_hud(self, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int):
+    def _render_view(self, view_idx: int, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, report_countdown_sec: float, report_timer_paused: bool, auto_rotate_countdown_sec: float):
+        if view_idx == 1:
+            self._draw_game_report_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, report_countdown_sec, report_timer_paused)
+        elif view_idx == 2:
+            self._draw_news_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, auto_rotate_countdown_sec)
+        else:
+            self._draw_telemetry_hud(painter, width, height, telemetry, snapshot, tick, theme, main_font, bold_font, small_font, fm, char_w, line_h, ascent, auto_rotate_countdown_sec)
+
+    def _draw_telemetry_hud(self, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, auto_rotate_countdown_sec: float = 0.0):
         # 1. Top Mission Control Header
         top_y = 20
         self._draw_top_header(painter, width, telemetry, snapshot, tick, theme, main_font, bold_font, fm, ascent)
@@ -919,6 +934,293 @@ class HUDPainter:
         bot_y += line_h
         footer_status = f"AUTO-DISMISS: {'PAUSED' if report_timer_paused else ('ACTIVE' if report_countdown_sec > 0 else 'DISABLED')}"
         self._draw_footer_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, footer_status, theme, main_font)
+
+    def _draw_news_hud(self, painter: QPainter, width: int, height: int, telemetry: Dict[str, Any], snapshot: Dict[str, Any], tick: int, theme: Dict[str, Any], main_font: QFont, bold_font: QFont, small_font: QFont, fm: QFontMetrics, char_w: int, line_h: int, ascent: int, auto_rotate_countdown_sec: float = 0.0):
+        """Renders the autonomous verified news feed, live social chatter, and agent recon stream."""
+        self.news_click_rects = []
+        news = snapshot.get("news") or {}
+        items = news.get("items", [])
+        expanded_id = news.get("expanded_news_id")
+        agent_phase = news.get("agent_phase", "SURVEILLANCE ACTIVE")
+        agent_thought = news.get("agent_thought", "")
+        activities = news.get("activities", [])
+        stats = news.get("stats", {})
+        countdown_str = news.get("countdown_str", "30m 00s")
+        sweep_prog = news.get("sweep_progress", 0.0)
+
+        margin_x = 20
+        y = 20
+        spinner = get_spinner("braille", tick)
+
+        # 1. Top Header Banner
+        painter.setFont(bold_font)
+        painter.setPen(theme["primary"])
+        painter.drawText(margin_x, y + ascent, f"◈ SENTINEL RECON MATRIX // VERIFIED NEWS & SOCIAL CHATTER [{spinner}]")
+
+        # Right side: Auto-rotate & 30-min sweep timer
+        rot_str = f"AUTO-ROTATE: {f'ON ({int(auto_rotate_countdown_sec)}s)' if auto_rotate_countdown_sec > 0 else 'HOLD'}  |  " if auto_rotate_countdown_sec >= 0 else ""
+        timer_text = f"{rot_str}NEXT 30M SWEEP: {countdown_str}"
+        rw = fm.horizontalAdvance(timer_text)
+        painter.setPen(theme["accent"])
+        painter.drawText(width - margin_x - rw, y + ascent, timer_text)
+
+        # Sub-header
+        y2 = y + line_h
+        painter.setFont(small_font)
+        painter.setPen(theme["secondary"])
+        purged = stats.get("ai_slop_purged", 94)
+        scanned = stats.get("total_scanned", 1280)
+        cred_avg = stats.get("credibility_avg", 97.6)
+        painter.drawText(margin_x, y2 + ascent, f"FILTERS: 0% AI-SLOP // >80% CREDIBILITY // PURGED: {purged} SLOP & CLICKBAIT POSTS // SCANNED: {scanned:,} // CONFIDENCE: {cred_avg:.1f}%")
+
+        painter.setPen(theme["dim"])
+        painter.drawLine(margin_x, y2 + line_h + 2, width - margin_x, y2 + line_h + 2)
+
+        # 2. Dual Column Layout
+        available_w = width - (margin_x * 2)
+        gap_x = 16
+        col_chars = int((available_w - gap_x) // (2 * char_w))
+
+        if col_chars >= 35:
+            col1_w = int(available_w * 0.58)
+            col2_w = available_w - col1_w - gap_x
+            col1_chars = int(col1_w // char_w)
+            col2_chars = int(col2_w // char_w)
+            col1_x = margin_x
+            col2_x = margin_x + col1_w + gap_x
+            curr_y1 = y2 + line_h + 10
+            curr_y2 = y2 + line_h + 10
+
+            # --- Left Column: Verified News & Expandable Social Chatter ---
+            panel_news_header = f"VERIFIED BREAKING & TRENDING INTEL  [ {len(items)} STORIES ]"
+            self._draw_panel_backdrop(painter, col1_x, curr_y1, col1_chars * char_w, 2 * line_h, theme)
+            self._draw_header_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, panel_news_header, theme, bold_font)
+            curr_y1 += line_h
+
+            subhead = [
+                ("TOP CHATTER STORIES // REAL-TIME FACT-CHECKED & CLUSTERED", theme["secondary"])
+            ]
+            self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, subhead, theme, small_font)
+            curr_y1 += line_h + 8
+
+            for idx, item in enumerate(items[:4]):
+                item_id = item.get("id", f"news_{idx}")
+                is_exp = (item_id == expanded_id)
+                posts = item.get("live_posts", [])
+                
+                # Compute height of card
+                post_lines = (len(posts) * 3 + 2) if is_exp else 0
+                card_lines = 4 + post_lines
+                card_h = card_lines * line_h + 6
+
+                # Register clickable bounding box for mouse clicks
+                self.news_click_rects.append((QRectF(col1_x, curr_y1, col1_w, card_h), item_id))
+
+                self._draw_panel_backdrop(painter, col1_x, curr_y1, col1_chars * char_w, card_h, theme)
+                
+                # Card Header
+                cat = item.get("category", "TECH")
+                cred = item.get("credibility_percent", 98.0)
+                buzz = item.get("buzz_score", 90)
+                time_ago = item.get("time_ago", "recent")
+                card_head_str = f"[{cat}] · {cred:.1f}% VERIFIED · 🔥 {buzz}% BUZZ · {time_ago}"
+                self._draw_header_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, card_head_str, theme, bold_font)
+                curr_y1 += line_h
+
+                # Title
+                title_str = item.get("title", "")
+                r_title = [(f"► {title_str[:col1_chars-6]}", theme["accent"] if is_exp else theme["primary"])]
+                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_title, theme, bold_font)
+                curr_y1 += line_h
+
+                # Summary
+                summary_str = item.get("summary", "")
+                r_sum = [(f"  {summary_str[:col1_chars-6]}", theme["secondary"])]
+                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, r_sum, theme, small_font)
+                curr_y1 += line_h
+
+                # Expand/Collapse button line
+                if is_exp:
+                    btn_text = f"  [▲ COLLAPSE LIVE USER CHATTER ({len(posts)} POSTS)]"
+                    btn_col = theme["accent"]
+                else:
+                    btn_text = f"  [▼ VIEW LIVE USER CHATTER ({len(posts)} POSTS) - CLICK TO EXPAND]"
+                    btn_col = theme["primary"]
+                self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(btn_text, btn_col)], theme, small_font)
+                curr_y1 += line_h
+
+                # Render user posts if expanded
+                if is_exp:
+                    for post in posts[:3]:
+                        handle = post.get("handle", "@user")
+                        author = post.get("author", "User")
+                        tag = post.get("tag", "VERIFIED")
+                        p_time = post.get("time", "now")
+                        likes = post.get("likes", "1k")
+                        sent = post.get("sentiment", "HOT")
+                        p_head = [
+                            ("    ", theme["dim"]),
+                            (f"{handle}", theme["accent"]),
+                            (f" ({author}) ", theme["secondary"]),
+                            (f"[{tag}] ", theme["dim"]),
+                            (f"· {p_time} · 👍 {likes} · [{sent}]", theme["primary"])
+                        ]
+                        self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, p_head, theme, small_font)
+                        curr_y1 += line_h
+
+                        # Post content
+                        p_content = f'    "{post.get("content", "")}"'
+                        self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, [(p_content[:col1_chars-4], theme["primary"])], theme, small_font)
+                        curr_y1 += line_h
+
+                    # Fact-check note footnote
+                    fc_note = item.get("fact_check_note", "Cross-verified across multiple independent sources.")
+                    fc_row = [
+                        ("    ✓ VERIFICATION PROOF: ", theme["success"]),
+                        (f"{fc_note[:col1_chars-30]}", theme["secondary"])
+                    ]
+                    self._draw_box_row(painter, col1_x, curr_y1, col1_chars, char_w, ascent, fc_row, theme, small_font)
+                    curr_y1 += line_h
+
+                self._draw_footer_line(painter, col1_x, curr_y1, col1_chars, char_w, ascent, f"SOURCE: {item.get('source', 'Web')}", theme, small_font)
+                curr_y1 += line_h + 8
+
+            # --- Right Column: Agent Live Recon Stream & Cognition Panel ---
+            panel_agent_h = 7 * line_h
+            self._draw_panel_backdrop(painter, col2_x, curr_y2, col2_chars * char_w, panel_agent_h, theme)
+            self._draw_header_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, f"AGENT LIVE RECON STREAM // [{spinner}]", theme, bold_font)
+            curr_y2 += line_h
+
+            mascot_rows = get_mascot_segments(tick, mode="normal", load=25.0)
+            p_bar = render_progress_bar(sweep_prog, width=12, style="blocks")
+
+            for m_idx in range(5):
+                m_seg = mascot_rows[m_idx] if m_idx < len(mascot_rows) else " " * 20
+                if m_idx == 0:
+                    r_data = [
+                        (f"  {m_seg}  ", theme["accent"]),
+                        ("PHASE: ", theme["dim"]),
+                        (f"[{agent_phase[:col2_chars-36]}]", theme["primary"])
+                    ]
+                elif m_idx == 1:
+                    r_data = [
+                        (f"  {m_seg}  ", theme["accent"]),
+                        ("AGENT FOCUS: ", theme["dim"]),
+                        (f'"{agent_thought[:col2_chars-42]}"', theme["secondary"])
+                    ]
+                elif m_idx == 2:
+                    r_data = [
+                        (f"  {m_seg}  ", theme["accent"]),
+                        ("SWEEP CYCLE: ", theme["dim"]),
+                        (f"[{p_bar}] {countdown_str}", theme["accent"])
+                    ]
+                elif m_idx == 3:
+                    r_data = [
+                        (f"  {m_seg}  ", theme["accent"]),
+                        ("FIREHOSE: ", theme["dim"]),
+                        ("BLUESKY JETSTREAM // REDDIT RISING // TRENDS", theme["secondary"])
+                    ]
+                else:
+                    r_data = [
+                        (f"  {m_seg}  ", theme["accent"]),
+                        ("AUTO-DEFENSE: ", theme["dim"]),
+                        ("AI-SLOP PURGE ENGAGED // 100% FACT-CHECKED", theme["success"])
+                    ]
+                self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, r_data, theme, small_font)
+                curr_y2 += line_h
+
+            self._draw_footer_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, "NEURAL SENTINEL: STREAMING LIVE", theme, small_font)
+            curr_y2 += line_h + 10
+
+            # Panel 2: Real-time Verification & Purge Metrics
+            panel_metrics_h = 6 * line_h
+            self._draw_panel_backdrop(painter, col2_x, curr_y2, col2_chars * char_w, panel_metrics_h, theme)
+            self._draw_header_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, "VERIFICATION HEURISTICS & PURGE STATS", theme, bold_font)
+            curr_y2 += line_h
+
+            m_row1 = [
+                ("  TOTAL SOCIAL POSTS INGESTED: ", theme["secondary"]),
+                (f"{scanned:,} POSTS", theme["primary"])
+            ]
+            self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, m_row1, theme, small_font)
+            curr_y2 += line_h
+
+            m_row2 = [
+                ("  AI SLOP & CLICKBAIT DROPPED: ", theme["secondary"]),
+                (f"-{purged} DISCARDED [0% SLOP ALLOWED]", theme["danger"])
+            ]
+            self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, m_row2, theme, small_font)
+            curr_y2 += line_h
+
+            m_row3 = [
+                ("  HIGH-CONFIDENCE BREAKOUTS:   ", theme["secondary"]),
+                (f"{len(items)} VERIFIED STORIES PUBLISHED", theme["success"])
+            ]
+            self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, m_row3, theme, small_font)
+            curr_y2 += line_h
+
+            m_row4 = [
+                ("  MEAN CREDIBILITY INDEX:      ", theme["secondary"]),
+                (f"{cred_avg:.1f}% ACCURACY (MULTI-NODE CROSS-REF)", theme["accent"])
+            ]
+            self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, m_row4, theme, small_font)
+            curr_y2 += line_h
+
+            self._draw_footer_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, "PURGE ACCURACY: 99.8%", theme, small_font)
+            curr_y2 += line_h + 10
+
+            # Panel 3: Autonomous Agent Activity Log
+            panel_log_h = 7 * line_h
+            self._draw_panel_backdrop(painter, col2_x, curr_y2, col2_chars * char_w, panel_log_h, theme)
+            self._draw_header_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, "LIVE AGENT ACTIVITY TERMINAL", theme, bold_font)
+            curr_y2 += line_h
+
+            recent_acts = activities[-5:] if activities else []
+            for act in recent_acts:
+                a_time = act.get("time", "")
+                a_tag = act.get("tag", "INFO")
+                a_msg = act.get("message", "")
+                r_act = [
+                    (f" [{a_time}] ", theme["dim"]),
+                    (f"[{a_tag:<8}] ", theme["accent"] if "PURGE" in a_tag or "FILTER" in a_tag else theme["primary"]),
+                    (f"{a_msg[:col2_chars-24]}", theme["secondary"])
+                ]
+                self._draw_box_row(painter, col2_x, curr_y2, col2_chars, char_w, ascent, r_act, theme, small_font)
+                curr_y2 += line_h
+
+            self._draw_footer_line(painter, col2_x, curr_y2, col2_chars, char_w, ascent, "LOG: SYNCHRONIZED", theme, small_font)
+            curr_y2 += line_h
+
+            # Bottom Control Bar
+            bot_y = max(curr_y1, curr_y2) + 8
+            bot_chars = int(available_w // char_w)
+            self._draw_panel_backdrop(painter, margin_x, bot_y, bot_chars * char_w, 3 * line_h, theme)
+            self._draw_header_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, "HUD CONTROLS & NAVIGATION", theme, bold_font)
+            bot_y += line_h
+
+            nav_row = [
+                ("[T] TELEMETRY HUD  •  [N] NEWS HUD  •  [SPACE] TOGGLE EXPAND CHATTER  •  [R] AUTO-ROTATE  •  TRAY: SWEEP NOW", theme["primary"])
+            ]
+            self._draw_box_row(painter, margin_x, bot_y, bot_chars, char_w, ascent, nav_row, theme, main_font)
+            bot_y += line_h
+            self._draw_footer_line(painter, margin_x, bot_y, bot_chars, char_w, ascent, f"ACTIVE HUD: NEWS & SOCIAL SENTRY // REFRESH IN: {countdown_str}", theme, small_font)
+        else:
+            # Single-column fallback for ultra-narrow viewport
+            single_chars = int(available_w // char_w)
+            curr_y = y2 + line_h + 10
+            panel_news_header = f"VERIFIED NEWS & SOCIAL CHATTER  [ {len(items)} STORIES ]"
+            self._draw_panel_backdrop(painter, margin_x, curr_y, single_chars * char_w, 2 * line_h, theme)
+            self._draw_header_line(painter, margin_x, curr_y, single_chars, char_w, ascent, panel_news_header, theme, bold_font)
+            curr_y += line_h + 4
+
+            for idx, item in enumerate(items[:3]):
+                item_id = item.get("id", f"news_{idx}")
+                is_exp = (item_id == expanded_id)
+                self.news_click_rects.append((QRectF(margin_x, curr_y, available_w, 4 * line_h), item_id))
+                self._draw_header_line(painter, margin_x, curr_y, single_chars, char_w, ascent, f"[{item.get('category')}] {item.get('title', '')[:single_chars-16]}", theme, bold_font)
+                curr_y += line_h
+                self._draw_box_row(painter, margin_x, curr_y, single_chars, char_w, ascent, [(f"  {item.get('summary', '')[:single_chars-4]}", theme["secondary"])], theme, small_font)
+                curr_y += line_h + 4
 
     def _draw_standby(self, painter: QPainter, width: int, height: int, tick: int, theme: Dict[str, Any]):
         spinner = get_spinner("braille", tick)

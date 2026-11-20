@@ -17,5 +17,7 @@
     "custom_games": [],
     "game_report_auto_dismiss_sec": 150,
     "agent_avatar_enabled": true,
-    "agent_neural_wave_enabled": true
+    "agent_neural_wave_enabled": true,
+    "auto_rotate_hud": true,
+    "hud_rotation_interval_sec": 45
 }

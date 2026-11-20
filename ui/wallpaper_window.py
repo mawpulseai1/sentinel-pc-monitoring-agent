@@ -46,14 +46,21 @@ class WallpaperWindow(QWidget):
         self.current_theme = get_theme(self.config_mgr.get("theme", "cyber_neon"))
         
         # Multi-HUD View & Transition State
-        self.view_mode = 0             # 0: Live Telemetry HUD, 1: Game Performance Report HUD
-        self.transition_progress = 0.0 # 0.0 = Telemetry, 1.0 = Game Report
-        self.transition_target = 0.0
+        self.view_mode = 0             # 0: Live Telemetry HUD, 1: Game Debrief HUD, 2: News Sentry HUD
+        self.from_view = 0
+        self.to_view = 0
+        self.transition_target = 0.0   # Compatibility property
+        self.transition_progress = 1.0 # 1.0 = fully switched
         self._cached_snapshot = None
         
         # Debrief Auto-Dismiss Timer State
         self.report_countdown_sec = 0.0
         self.report_timer_paused = False
+
+        # HUD Auto-Rotation State (Rotates between Telemetry & News HUD)
+        self.auto_rotate_enabled = bool(self.config_mgr.get("auto_rotate_hud", True))
+        self.auto_rotate_interval = float(self.config_mgr.get("hud_rotation_interval_sec", 45))
+        self.auto_rotate_countdown = self.auto_rotate_interval
         
         # Configure Qt window attributes
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -155,6 +162,8 @@ class WallpaperWindow(QWidget):
 
     def _on_animation_frame(self):
         self.tick += 1
+        fps = max(10, min(60, int(self.config_mgr.get("fps", 30))))
+        dt = 1.0 / fps
         
         # Thread-safe check for new game report directly on main GUI thread
         self._cached_snapshot = self.agent.get_snapshot()
@@ -162,31 +171,43 @@ class WallpaperWindow(QWidget):
             self.agent.clear_new_game_report_flag()
             self.switch_to_view(1, auto_countdown=True)
         
-        # Step view transition animation smoothly
-        if abs(self.transition_progress - self.transition_target) > 0.001:
-            step = 0.075 # ~13 frames = ~400ms smooth transition
-            if self.transition_progress < self.transition_target:
-                self.transition_progress = min(self.transition_target, self.transition_progress + step)
-            else:
-                self.transition_progress = max(self.transition_target, self.transition_progress - step)
-            if self.transition_progress == self.transition_target:
-                self.view_mode = int(self.transition_target)
+        # Step multi-view sliding transition animation smoothly
+        if self.transition_progress < 1.0:
+            step = 0.08 # ~12 frames = ~380ms smooth slide
+            self.transition_progress = min(1.0, self.transition_progress + step)
+            if self.transition_progress >= 1.0:
+                self.view_mode = self.to_view
+                self.from_view = self.to_view
                 
         # Game Report Auto-Dismiss Timer Logic
         if self.view_mode == 1 and not self.report_timer_paused and self.report_countdown_sec > 0:
-            fps = max(10, min(60, int(self.config_mgr.get("fps", 30))))
-            dt = 1.0 / fps
             self.report_countdown_sec = max(0.0, self.report_countdown_sec - dt)
             if self.report_countdown_sec <= 0.0:
                 self.report_countdown_sec = 0.0
                 self.switch_to_view(0)
 
+        # HUD Auto-Rotation Logic (Rotates between Telemetry [0] and News [2])
+        if self.auto_rotate_enabled and self.view_mode != 1 and self.transition_progress >= 1.0:
+            self.auto_rotate_countdown = max(0.0, self.auto_rotate_countdown - dt)
+            if self.auto_rotate_countdown <= 0.0:
+                self.auto_rotate_countdown = self.auto_rotate_interval
+                next_v = 2 if self.view_mode == 0 else 0
+                self.switch_to_view(next_v)
+
         self.update()
 
     def switch_to_view(self, target_view: int, auto_countdown: bool = True):
-        """Triggers smooth animated transition to target view (0: Live Telemetry, 1: Game Report)."""
-        self.transition_target = float(target_view)
-        if target_view == 1:
+        """Triggers smooth animated slide transition to target view (0: Telemetry, 1: Game Report, 2: News Sentry)."""
+        target_int = int(target_view)
+        self.transition_target = float(target_int)
+        if target_int == self.to_view and self.transition_progress >= 0.999:
+            return
+
+        self.from_view = self.view_mode
+        self.to_view = target_int
+        self.transition_progress = 0.0
+        
+        if target_int == 1:
             dismiss_sec = float(self.config_mgr.get("game_report_auto_dismiss_sec", 150))
             if dismiss_sec > 0 and auto_countdown:
                 self.report_countdown_sec = dismiss_sec
@@ -194,6 +215,24 @@ class WallpaperWindow(QWidget):
         else:
             self.report_countdown_sec = 0.0
             self.report_timer_paused = False
+
+        # Reset auto-rotate countdown on manual view switches
+        self.auto_rotate_countdown = self.auto_rotate_interval
+        self.update()
+
+    def toggle_auto_rotate(self) -> bool:
+        """Toggles automatic periodic rotation between Telemetry HUD and News HUD."""
+        self.auto_rotate_enabled = not self.auto_rotate_enabled
+        self.config_mgr.set("auto_rotate_hud", self.auto_rotate_enabled)
+        self.auto_rotate_countdown = self.auto_rotate_interval
+        self.update()
+        return self.auto_rotate_enabled
+
+    def set_auto_rotate_interval(self, sec: float):
+        """Sets the auto-rotation period in seconds (e.g. 30s, 45s, 60s)."""
+        self.auto_rotate_interval = max(10.0, float(sec))
+        self.config_mgr.set("hud_rotation_interval_sec", self.auto_rotate_interval)
+        self.auto_rotate_countdown = self.auto_rotate_interval
         self.update()
 
     def toggle_report_timer_pause(self):
@@ -212,14 +251,41 @@ class WallpaperWindow(QWidget):
         self.update()
 
     def toggle_view(self):
-        """Toggles between Telemetry HUD and Game Report HUD with smooth animation."""
-        new_target = 1 if self.transition_target < 0.5 else 0
+        """Cycles between Telemetry HUD and News HUD with smooth slide animation."""
+        new_target = 2 if self.to_view == 0 else 0
         self.switch_to_view(new_target)
 
+    def mousePressEvent(self, event):
+        """Handles interactive clicks on expandable news items."""
+        pos = event.position().toPoint()
+        # Check if clicked inside any news story card
+        for rect, news_id in getattr(self.painter_engine, "news_click_rects", []):
+            if rect.contains(pos):
+                self.agent.toggle_news_expansion(news_id)
+                self.update()
+                break
+        super().mousePressEvent(event)
+
     def keyPressEvent(self, event):
-        """Allows hotkey toggling (T key)."""
-        if event.key() == Qt.Key.Key_T:
-            self.toggle_view()
+        """Hotkey controls: T (Telemetry), N (News), G (Game), R (Auto-Rotate), Space (Expand News)."""
+        key = event.key()
+        if key == Qt.Key.Key_T:
+            self.switch_to_view(0)
+        elif key == Qt.Key.Key_N:
+            self.switch_to_view(2)
+        elif key == Qt.Key.Key_G:
+            self.switch_to_view(1)
+        elif key == Qt.Key.Key_R:
+            self.toggle_auto_rotate()
+        elif key == Qt.Key.Key_Space:
+            # Toggle expansion of currently visible news item
+            snap = self._cached_snapshot or self.agent.get_snapshot()
+            news_items = snap.get("news", {}).get("items", [])
+            if news_items:
+                cur_exp = snap.get("news", {}).get("expanded_news_id")
+                next_id = news_items[0]["id"] if not cur_exp else cur_exp
+                self.agent.toggle_news_expansion(next_id)
+                self.update()
         super().keyPressEvent(event)
 
     def paintEvent(self, event):
@@ -233,9 +299,12 @@ class WallpaperWindow(QWidget):
             self.tick,
             self.current_theme,
             view_mode=self.view_mode,
+            from_view=self.from_view,
+            to_view=self.to_view,
             transition_progress=self.transition_progress,
             report_countdown_sec=self.report_countdown_sec,
-            report_timer_paused=self.report_timer_paused
+            report_timer_paused=self.report_timer_paused,
+            auto_rotate_countdown_sec=self.auto_rotate_countdown if self.auto_rotate_enabled else -1.0
         )
 
     # Runtime configuration hooks
